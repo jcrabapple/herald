@@ -118,25 +118,21 @@ class WidgetUpdater(
             manager.getAppWidgetIds(ComponentName(context, provider))
 
         val nowIds = ids(NowWidgetProvider::class.java)
-        val nowViews = WidgetViews.renderNow(context, outcome.now, locked, outcome.nowCold, colors, bots, 0)
-        for (id in nowIds) manager.updateAppWidget(id, nowViews)
+        for (id in nowIds) manager.updateAppWidget(id, WidgetViews.renderNow(context, outcome.now, locked, outcome.nowCold, colors, bots, id))
         rememberScopes(nowIds, KIND_NOW, outcome)
 
         val chatsIds = ids(ChatsWidgetProvider::class.java)
-        val chatsViews = WidgetViews.renderChats(context, outcome.chats, locked, colors, outcome.gatewayLabel, outcome.profile, 0)
-        for (id in chatsIds) manager.updateAppWidget(id, chatsViews)
+        for (id in chatsIds) manager.updateAppWidget(id, WidgetViews.renderChats(context, outcome.chats, locked, colors, outcome.gatewayLabel, outcome.profile, id))
         if (!locked) manager.notifyAppWidgetViewDataChanged(chatsIds, R.id.list)
         rememberScopes(chatsIds, KIND_CHATS, outcome)
 
         val kanbanIds = ids(KanbanWidgetProvider::class.java)
-        val kanbanViews = WidgetViews.renderKanban(context, outcome.kanban, locked, colors, 0)
-        for (id in kanbanIds) manager.updateAppWidget(id, kanbanViews)
+        for (id in kanbanIds) manager.updateAppWidget(id, WidgetViews.renderKanban(context, outcome.kanban, locked, colors, id))
         if (!locked) manager.notifyAppWidgetViewDataChanged(kanbanIds, R.id.list)
         rememberScopes(kanbanIds, KIND_KANBAN, outcome)
 
         val scheduledIds = ids(ScheduledWidgetProvider::class.java)
-        val scheduledViews = WidgetViews.renderScheduled(context, outcome.scheduled, locked, colors, 0)
-        for (id in scheduledIds) manager.updateAppWidget(id, scheduledViews)
+        for (id in scheduledIds) manager.updateAppWidget(id, WidgetViews.renderScheduled(context, outcome.scheduled, locked, colors, id))
         if (!locked) manager.notifyAppWidgetViewDataChanged(scheduledIds, R.id.list)
         rememberScopes(scheduledIds, KIND_SCHEDULED, outcome)
     }

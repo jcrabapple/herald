@@ -38,6 +38,22 @@ class WidgetViewsRenderTest {
     private val context = RuntimeEnvironment.getApplication()
     private val colors get() = WidgetColors(context, "Blue")
 
+    @Test
+    fun collectionAdapterIntentsAreDistinctPerScope() {
+        // The framework matches cached RemoteViewsAdapters with Intent.filterEquals(), which ignores
+        // extras. Each widget scope must carry a distinct data URI, or Scheduled/Kanban reuse the
+        // first-bound (Chats) adapter and show chats instead of their own rows.
+        val chats = WidgetViews.serviceIntent(context, WidgetIntents.KIND_CHATS, "https://gw", "default", null)
+        val scheduled = WidgetViews.serviceIntent(context, WidgetIntents.KIND_SCHEDULED, "https://gw", null, null)
+        val kanban = WidgetViews.serviceIntent(context, WidgetIntents.KIND_KANBAN, "https://gw", null, "board")
+        assertTrue("chats vs scheduled adapters must not collide", !chats.filterEquals(scheduled))
+        assertTrue("chats vs kanban adapters must not collide", !chats.filterEquals(kanban))
+        assertTrue("scheduled vs kanban adapters must not collide", !scheduled.filterEquals(kanban))
+        // The same scope still matches, so a widget reuses its own adapter across refreshes.
+        val chatsAgain = WidgetViews.serviceIntent(context, WidgetIntents.KIND_CHATS, "https://gw", "default", null)
+        assertTrue(chats.filterEquals(chatsAgain))
+    }
+
     private fun RemoteViews.applied(): View = apply(context, FrameLayout(context))
 
     private fun quietNow() = NowWidgetSnapshot(

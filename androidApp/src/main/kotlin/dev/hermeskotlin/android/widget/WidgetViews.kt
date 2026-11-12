@@ -9,6 +9,7 @@ import android.os.Build
 import android.widget.RemoteViews
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.createBitmap
+import androidx.core.net.toUri
 import dev.hermeskotlin.android.R
 import dev.hermeskotlin.android.notify.BotIcons
 import dev.hermeskotlin.android.notify.BotNotifier
@@ -598,7 +599,7 @@ object WidgetViews {
         tint(R.id.saved_notice_icon, colors.warning)
     }
 
-    private fun serviceIntent(
+    internal fun serviceIntent(
         context: Context,
         kind: String,
         gateway: String,
@@ -610,6 +611,13 @@ object WidgetViews {
         .apply {
             profile?.let { putExtra(WidgetIntents.EXTRA_WIDGET_PROFILE, it) }
             board?.let { putExtra(WidgetIntents.EXTRA_WIDGET_BOARD, it) }
+            // The framework matches cached RemoteViewsAdapters with Intent.filterEquals(), which ignores
+            // extras. Without a distinct data URI every collection widget reuses the first-bound adapter
+            // and shows the same rows (Scheduled showed Chats). Encode the scope into the data to separate them.
+            data = (
+                "kyllene-widget://" + kind + "/" + android.net.Uri.encode(gateway) +
+                    "/" + android.net.Uri.encode(profile.orEmpty()) + "/" + android.net.Uri.encode(board.orEmpty())
+                ).toUri()
         }
 
     // Tasks / Kanban (docs/WIDGETS-DESIGN.md §8).
