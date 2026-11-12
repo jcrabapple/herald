@@ -11,6 +11,7 @@ import dev.hermeskotlin.core.settings.SettingsStore
 import dev.hermeskotlin.core.storage.InMemoryKeyValueStore
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.MockEngineConfig
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -59,8 +60,8 @@ class KanbanTailLifecycleTest {
     private fun boardJson(latestEventId: Int = 7) =
         """{"columns":[{"name":"ready","tasks":[{"id":"t_1","title":"A card","status":"ready"}]}],"tenants":[],"assignees":[],"latest_event_id":$latestEventId,"now":1}"""
 
-    /** A scripted engine: board GETs counted, the rest answered generically. MockEngine answers on a
-     *  real dispatcher, so counters are volatile and tests pump the unconfined queue until they land. */
+    /** A scripted engine: board GETs counted, the rest answered generically. MockEngine answers on the
+     *  test scheduler; tests pump the unconfined queue until the counters land. */
     private inner class Engine {
         @Volatile var boardGets = 0
         @Volatile var otherGets = 0
@@ -86,34 +87,43 @@ class KanbanTailLifecycleTest {
             }
         }
 
-        fun client(): HttpClient = createHttpClient(MockEngine { request ->
-            when {
-                request.url.encodedPath.endsWith("/boards") -> respond(boardsJson(), HttpStatusCode.OK, json)
-                request.url.encodedPath.endsWith("/board") && request.url.parameters["board"] == "other" -> {
-                    boardGets++
-                    otherGets++
-                    if (otherGets == 1) {
-                        firstOtherGetArrived.complete(Unit)
-                        holdFirstOtherGet?.await()
+        fun client(): HttpClient = createHttpClient(
+            MockEngine(
+                MockEngineConfig().apply {
+                    // Answer on the test scheduler, not a real dispatcher: a real-thread callback can
+                    // resume a coroutine onto Main after runTest resets it, which flakes the teardown.
+                    dispatcher = this@KanbanTailLifecycleTest.dispatcher
+                    addHandler { request ->
+                        when {
+                            request.url.encodedPath.endsWith("/boards") -> respond(boardsJson(), HttpStatusCode.OK, json)
+                            request.url.encodedPath.endsWith("/board") && request.url.parameters["board"] == "other" -> {
+                                boardGets++
+                                otherGets++
+                                if (otherGets == 1) {
+                                    firstOtherGetArrived.complete(Unit)
+                                    holdFirstOtherGet?.await()
+                                }
+                                respond(boardJson(), HttpStatusCode.OK, json)
+                            }
+                            request.url.encodedPath.endsWith("/board") -> {
+                                boardGets++
+                                // A fresh `latest_event_id` per GET lets tests await a reload's full completion
+                                // (response applied to state), not just the request leaving the client.
+                                respond(boardJson(boardGets), HttpStatusCode.OK, json)
+                            }
+                            request.url.encodedPath.endsWith("/log") -> respond(
+                                """{"task_id":"t_1","path":"","exists":false,"size_bytes":0,"content":"","truncated":false}""",
+                                HttpStatusCode.OK, json,
+                            )
+                            else -> respond(
+                                """{"task":{"id":"t_1","title":"A card","status":"ready"},"comments":[],"events":[],"attachments":[],"links":{"parents":[],"children":[]},"link_tasks":[],"child_results":[],"runs":[]}""",
+                                HttpStatusCode.OK, json,
+                            )
+                        }
                     }
-                    respond(boardJson(), HttpStatusCode.OK, json)
-                }
-                request.url.encodedPath.endsWith("/board") -> {
-                    boardGets++
-                    // A fresh `latest_event_id` per GET lets tests await a reload's full completion
-                    // (response applied to state), not just the request leaving the client.
-                    respond(boardJson(boardGets), HttpStatusCode.OK, json)
-                }
-                request.url.encodedPath.endsWith("/log") -> respond(
-                    """{"task_id":"t_1","path":"","exists":false,"size_bytes":0,"content":"","truncated":false}""",
-                    HttpStatusCode.OK, json,
-                )
-                else -> respond(
-                    """{"task":{"id":"t_1","title":"A card","status":"ready"},"comments":[],"events":[],"attachments":[],"links":{"parents":[],"children":[]},"link_tasks":[],"child_results":[],"runs":[]}""",
-                    HttpStatusCode.OK, json,
-                )
-            }
-        })
+                },
+            ),
+        )
     }
 
     /** One channel per board; records every observe, each frame that reaches the tail, and collector cancellations. */

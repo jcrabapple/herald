@@ -15,6 +15,7 @@ import dev.hermeskotlin.core.settings.withKanbanBoard
 import dev.hermeskotlin.core.storage.InMemoryKeyValueStore
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.MockEngineConfig
 import io.ktor.client.engine.mock.MockRequestHandleScope
 import io.ktor.client.engine.mock.respond
 import io.ktor.client.request.HttpRequestData
@@ -103,7 +104,16 @@ class KanbanViewModelTest {
     private fun logJson() = """{"task_id":"t_1","path":"","exists":true,"size_bytes":1,"content":"ok","truncated":false}"""
 
     private fun client(handler: suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData): HttpClient =
-        createHttpClient(MockEngine(handler))
+        createHttpClient(
+            MockEngine(
+                MockEngineConfig().apply {
+                    // Answer on the test scheduler, not a real dispatcher: a real-thread callback can
+                    // resume a coroutine onto Main after runTest resets it, which flakes the teardown.
+                    dispatcher = this@KanbanViewModelTest.dispatcher
+                    addHandler(handler)
+                },
+            ),
+        )
 
     /** One channel per board; records observes, tail starts and collector cancellations. */
     private class FakeEvents : KanbanEvents {
@@ -142,7 +152,7 @@ class KanbanViewModelTest {
         KanbanViewModel(KanbanApi(client), events, store ?: SettingsStore(InMemoryKeyValueStore(), CoroutineScope(dispatcher)))
 
     /** The common engine: boards + board + generic task/log, with counters and switches.
-     *  MockEngine answers on a real dispatcher, so counters are volatile and tests poll them. */
+     *  MockEngine answers on the test scheduler; tests poll the counters until they land. */
     private inner class Engine {
         @Volatile var boardsCalls = 0
         @Volatile var boardGets = 0
