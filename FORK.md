@@ -71,11 +71,16 @@ and settings are re-entered once. Desktop/Flatpak signing secrets are optional (
 
 ```sh
 git checkout downstream
-git tag v0.16.0-fork.1 && git push fork v0.16.0-fork.1   # drafts a release; publish it on GitHub
+git tag v0.16.1 && git push fork v0.16.1   # drafts a release; publish it on GitHub
 ```
 
-Use a version that sorts above the upstream release it is based on, and keep the `-fork.N` suffix so it
-is clear this is a fork build. Publishing the draft is what makes the app offer it as an update.
+Use **plain `MAJOR.MINOR.PATCH` semver** with no suffix, sorting above the upstream release it is based
+on. A `-fork.N` suffix breaks the build: `desktopApp`'s jpackage MSI package version must be pure
+`MAJOR.MINOR.BUILD` integers and fails at configuration time (`Illegal version for 'Msi'`), which kills
+the whole release job even though only the phone APK is wanted. Plain semver also keeps `versionCode`
+(`major*10000 + minor*100 + patch`) increasing — a suffix is stripped before `versionCode` is computed, so
+`-fork.1` → `-fork.2` would NOT raise it and the next release would not install over the last. Bump the
+patch (or minor) for every fork release. Publishing the draft is what makes the app offer it as an update.
 
 ## Dropping a feature upstream merges
 
