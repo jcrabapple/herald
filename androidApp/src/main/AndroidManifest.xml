@@ -467,10 +467,12 @@
             The four home-screen widgets (docs/WIDGETS-SPEC.md D24-D25): one AppWidgetProvider each, the
             provider info under res/xml, and the RemoteViewsService backing the three scrollable lists.
             The refresh buttons send the explicit ACTION_REFRESH_* broadcasts the providers listen for.
+            exported="true" is required: the launcher fires the refresh PendingIntent, and a non-exported
+            receiver is skipped for that broadcast (the refresh button silently did nothing).
         -->
         <receiver
             android:name=".widget.NowWidgetProvider"
-            android:exported="false"
+            android:exported="true"
             android:label="@string/widget_now_label">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
@@ -482,7 +484,7 @@
         </receiver>
         <receiver
             android:name=".widget.ChatsWidgetProvider"
-            android:exported="false"
+            android:exported="true"
             android:label="@string/widget_chats_label">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
@@ -494,7 +496,7 @@
         </receiver>
         <receiver
             android:name=".widget.KanbanWidgetProvider"
-            android:exported="false"
+            android:exported="true"
             android:label="@string/widget_kanban_label">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
@@ -506,7 +508,7 @@
         </receiver>
         <receiver
             android:name=".widget.ScheduledWidgetProvider"
-            android:exported="false"
+            android:exported="true"
             android:label="@string/widget_scheduled_label">
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />

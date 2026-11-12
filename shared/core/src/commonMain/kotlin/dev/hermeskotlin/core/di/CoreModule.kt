@@ -24,6 +24,7 @@ import dev.hermeskotlin.core.plugins.NextPromptApi
 import dev.hermeskotlin.core.plugins.PluginsApi
 import dev.hermeskotlin.core.cron.CronApi
 import dev.hermeskotlin.core.kanban.GatewayKanbanEvents
+import dev.hermeskotlin.core.kanban.KanbanEvents
 import dev.hermeskotlin.core.kanban.KanbanApi
 import dev.hermeskotlin.core.insights.InsightsApi
 import dev.hermeskotlin.core.config.ConfigApi
@@ -110,7 +111,7 @@ val coreModule = module {
     single { PluginsApi(get()) }
     single { NextPromptApi(get(), get(), get()) }
     single { KanbanApi(get()) }
-    single { GatewayKanbanEvents(get<HttpClient>(), get<AuthApi>()) }
+    single { GatewayKanbanEvents(get<HttpClient>(), get<AuthApi>()) } bind KanbanEvents::class
     single { InsightsApi(get()) }
     single { ConfigApi(get()) }
     single { LastChatStore(get()) }

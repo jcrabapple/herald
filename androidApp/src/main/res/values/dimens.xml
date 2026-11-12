@@ -51,13 +51,13 @@
     <dimen name="widget_placeholder_row_height">48dp</dimen>
     <dimen name="widget_placeholder_short_height">36dp</dimen>
 
-    <dimen name="widget_text_title">14sp</dimen>
-    <dimen name="widget_text_context">11sp</dimen>
-    <dimen name="widget_text_eyebrow">11sp</dimen>
-    <dimen name="widget_text_lead_title">16sp</dimen>
-    <dimen name="widget_text_quiet_title">22sp</dimen>
-    <dimen name="widget_text_row_title">14sp</dimen>
-    <dimen name="widget_text_metadata">11sp</dimen>
-    <dimen name="widget_text_body">12sp</dimen>
-    <dimen name="widget_text_time_primary">13sp</dimen>
+    <dimen name="widget_text_title">16sp</dimen>
+    <dimen name="widget_text_context">12sp</dimen>
+    <dimen name="widget_text_eyebrow">12sp</dimen>
+    <dimen name="widget_text_lead_title">18sp</dimen>
+    <dimen name="widget_text_quiet_title">24sp</dimen>
+    <dimen name="widget_text_row_title">16sp</dimen>
+    <dimen name="widget_text_metadata">13sp</dimen>
+    <dimen name="widget_text_body">14sp</dimen>
+    <dimen name="widget_text_time_primary">15sp</dimen>
 </resources>

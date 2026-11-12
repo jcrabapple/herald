@@ -36,6 +36,21 @@ class WidgetManifestTest {
     }
 
     @Test
+    fun allFourProvidersAreExportedForTheRefreshBroadcast() {
+        // The launcher fires the refresh PendingIntent; a non-exported provider is skipped for that
+        // broadcast, so the refresh button silently does nothing (v0.16.2 bug). Keep them exported.
+        for (provider in listOf(
+            NowWidgetProvider::class.java,
+            ChatsWidgetProvider::class.java,
+            KanbanWidgetProvider::class.java,
+            ScheduledWidgetProvider::class.java,
+        )) {
+            val info = pm.getReceiverInfo(ComponentName(context, provider), 0)
+            assertTrue("${provider.simpleName} must be exported so its refresh broadcast lands", info.exported)
+        }
+    }
+
+    @Test
     fun collectionServiceIsProtectedAndPrivate() {
         val info = pm.getServiceInfo(ComponentName(context, WidgetViewsService::class.java), 0)
         assertEquals("android.permission.BIND_REMOTEVIEWS", info.permission)

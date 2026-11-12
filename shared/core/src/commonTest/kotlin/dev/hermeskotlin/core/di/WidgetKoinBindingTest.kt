@@ -1,15 +1,19 @@
 package dev.hermeskotlin.core.di
 
+import dev.hermeskotlin.core.kanban.KanbanEvents
 import dev.hermeskotlin.core.widget.WidgetRefreshPipelines
 import org.koin.core.annotation.KoinInternalApi
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
 /**
- * Regression witness for the v0.16.1 startup crash: `WidgetRefresher` injects the
- * [WidgetRefreshPipelines] interface, but `coreModule` registered only the concrete
- * `WidgetDataAssembler`, so `get<WidgetRefreshPipelines>()` had no definition and the app died in
- * `Application.onCreate` (Koin "No definition found"). The fix binds the interface.
+ * Regression witnesses for injected-interface Koin bindings that unit tests miss because they pass
+ * fakes straight into constructors and never load the graph:
+ *  - v0.16.1 startup crash: `WidgetRefresher` injects [WidgetRefreshPipelines], registered only as
+ *    the concrete `WidgetDataAssembler` -> app died in `Application.onCreate`.
+ *  - v0.16.2 Kanban crash: `KanbanViewModel` injects [KanbanEvents], registered only as the concrete
+ *    `GatewayKanbanEvents` -> opening the Kanban page died in `koinViewModel()`.
+ * Both fixes bind the interface (`single { Concrete(...) } bind Interface::class`).
  *
  * This inspects the module's DEFINITIONS rather than starting Koin: the eager singletons
  * (`AttentionTracker`, `SessionWatcher`) launch coroutines at construction, so a full `startKoin`
@@ -20,18 +24,28 @@ import kotlin.test.assertTrue
 @OptIn(KoinInternalApi::class)
 class WidgetKoinBindingTest {
 
+    private fun boundTo(type: kotlin.reflect.KClass<*>): Boolean = coreModule.mappings.values.any { factory ->
+        val definition = factory.beanDefinition
+        definition.primaryType == type || type in definition.secondaryTypes
+    }
+
     @Test
     fun refreshPipelinesInterfaceHasADefinition() {
-        val bound = coreModule.mappings.values.any { factory ->
-            val definition = factory.beanDefinition
-            definition.primaryType == WidgetRefreshPipelines::class ||
-                WidgetRefreshPipelines::class in definition.secondaryTypes
-        }
         assertTrue(
-            bound,
+            boundTo(WidgetRefreshPipelines::class),
             "coreModule must bind WidgetDataAssembler to WidgetRefreshPipelines " +
                 "(single { WidgetDataAssembler(...) } bind WidgetRefreshPipelines::class); " +
                 "without it the widgets crash the app at startup",
+        )
+    }
+
+    @Test
+    fun kanbanEventsInterfaceHasADefinition() {
+        assertTrue(
+            boundTo(KanbanEvents::class),
+            "coreModule must bind GatewayKanbanEvents to KanbanEvents " +
+                "(single { GatewayKanbanEvents(...) } bind KanbanEvents::class); " +
+                "without it KanbanViewModel cannot be created and opening Kanban crashes",
         )
     }
 }
