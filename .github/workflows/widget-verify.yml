@@ -15,9 +15,23 @@ jobs:
           distribution: jetbrains
           java-version: "25"
       - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6
-      - name: Run widget refresher regressions
+      - name: Run Android widget regressions
         run: >-
-          ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.parallel=false
-          :androidApp:testDebugUnitTest
-          --tests "dev.hermeskotlin.android.widget.WidgetRefresherDeadlineTest"
+          ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.parallel=false --no-build-cache
+          :androidApp:cleanTest :androidApp:testDebugUnitTest
+          --tests "dev.hermeskotlin.android.widget.*"
           --console=plain
+      - name: Run cold merge regression
+        run: >-
+          ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.parallel=false --no-build-cache
+          :shared:core:cleanTest :shared:core:testAndroidHostTest
+          --tests "dev.hermeskotlin.core.widget.NowColdMergeTest"
+          --console=plain
+      - name: Build emulator APK
+        run: >-
+          ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.parallel=false --no-build-cache
+          :androidApp:assembleDebug --console=plain
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: widget-debug-apk
+          path: androidApp/build/outputs/apk/debug/androidApp-debug.apk
