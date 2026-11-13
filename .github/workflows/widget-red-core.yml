@@ -1,0 +1,23 @@
+name: Widget core red check
+on:
+  push:
+    branches: [widget-verify-red-core]
+  workflow_dispatch:
+
+jobs:
+  cold-merge-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: jetbrains
+          java-version: "25"
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6
+      - name: Run empty-roster regression without its fix
+        run: >-
+          ./gradlew --no-daemon --max-workers=1 -Dorg.gradle.parallel=false --no-build-cache
+          :shared:core:cleanTest :shared:core:testAndroidHostTest
+          --tests "dev.hermeskotlin.core.widget.NowColdMergeTest"
+          --console=plain
