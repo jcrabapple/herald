@@ -116,6 +116,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.rememberUpdatedState
 import dev.hermeskotlin.ui.MainPageSlot
+import dev.hermeskotlin.ui.showInMain
 import androidx.compose.ui.semantics.selected
 import dev.hermeskotlin.designsystem.components.verticalScrollWithBar
 import androidx.compose.foundation.text.input.placeCursorAtEnd
