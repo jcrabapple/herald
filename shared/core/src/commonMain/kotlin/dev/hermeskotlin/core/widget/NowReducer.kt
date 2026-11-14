@@ -21,13 +21,15 @@ import dev.hermeskotlin.core.sessions.SessionSummary
  */
 data class NowInputs(
     val sessions: List<SessionSummary>,
+    /** False when both the REST page and its offline fallback failed; an empty list then isn't deletion evidence. */
+    val sessionsKnown: Boolean = true,
     /** Null cold; when present, its `isUnread` semantics decide chat read state. */
     val seen: SeenChats?,
     /** `AttentionTracker.waiting` by stored id (empty cold). */
     val waiting: Map<String, Waiting>,
     /** `AttentionTracker.running` by stored id (empty cold). */
     val runningChats: Map<String, Boolean>,
-    /** The bot roster (empty cold: the REST surface has no roster). */
+    /** The bot roster (the saved roster on a cold refresh; empty only when none was saved). */
     val bots: List<Bot>,
     /** `BotHealth.troubles` by profile (empty cold). */
     val troubles: Map<String, BotTrouble>,
@@ -250,12 +252,15 @@ object NowReducer {
 
         val knownBotNames = knownBots.map { it.name }.toSet()
         val chatIds = freshInputs.sessions.flatMap { listOf(it.id) + it.lineageIds.orEmpty() }.toSet()
-        fun NowTarget.chatExists(): Boolean = storedSessionId == null || storedSessionId in chatIds
-        fun NowTarget.botExists(): Boolean = botProfile == null || botProfile in knownBotNames
+        fun NowTarget.chatExists(): Boolean =
+            storedSessionId == null || !freshInputs.sessionsKnown || storedSessionId in chatIds
+        fun NowTarget.botExists(): Boolean =
+            botProfile == null || knownBotNames.isEmpty() || botProfile in knownBotNames
 
         // A bot row's target also names the bot chat, which the Recent page never shows (bot chats are
         // machine-originated), so the roster is the only existence signal for it; a plain chat row is
-        // judged by the page alone.
+        // judged by the page alone when that page (or its offline fallback) was actually read. Missing
+        // REST/roster evidence keeps the corresponding carried rows; a successful empty result deletes them.
         fun NowTarget.exists(): Boolean = if (botProfile != null) botExists() else chatExists()
 
         val carriedNeedsYou = stored.needsYou

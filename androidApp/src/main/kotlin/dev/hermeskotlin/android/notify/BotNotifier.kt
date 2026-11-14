@@ -2,6 +2,7 @@ package dev.hermeskotlin.android.notify
 
 import android.content.Context
 import dev.hermeskotlin.core.bots.Bot
+import dev.hermeskotlin.core.bots.BotSession
 import dev.hermeskotlin.core.bots.BotsApi
 import dev.hermeskotlin.core.bots.forRoster
 import dev.hermeskotlin.core.chat.ChatHost
@@ -36,6 +37,18 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+
+/** Canonical chat IDs let cold widgets filter retitled bot chats; no session contents are kept on disk. */
+internal fun List<Bot>.forSavedRoster(): List<Bot> = map {
+    Bot(
+        name = it.name,
+        isDefault = it.isDefault,
+        displayName = it.displayName,
+        canonicalSession = it.canonicalSession?.let { chat -> BotSession(id = chat.id, resolvedId = chat.resolvedId) },
+        uiMeta = it.uiMeta,
+        hasAvatar = it.hasAvatar,
+    )
+}
 
 /**
  * Tells the user when a bot writes in its chat while Herald is out of sight, as a conversation
@@ -97,9 +110,7 @@ class BotNotifier(
     }.orEmpty().also { if (it.isNotEmpty()) roster = it }
 
     private fun saveRoster(bots: List<Bot>) {
-        // Only what notifications need: no session previews kept on disk.
-        val slim = bots.map { Bot(name = it.name, isDefault = it.isDefault, displayName = it.displayName, uiMeta = it.uiMeta, hasAvatar = it.hasAvatar) }
-        rosterPrefs.edit().putString(KEY_ROSTER, HermesJson.encodeToString(ListSerializer(Bot.serializer()), slim)).apply()
+        rosterPrefs.edit().putString(KEY_ROSTER, HermesJson.encodeToString(ListSerializer(Bot.serializer()), bots.forSavedRoster())).apply()
     }
 
     fun start() {
