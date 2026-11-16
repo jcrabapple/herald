@@ -101,6 +101,11 @@ data class AppSettings(
     val voicePause: VoicePause = VoicePause.Normal,
     /** Default call destination per saved gateway; absence starts a new conversation in its selected profile. */
     val callTargets: Map<String, CallTarget> = emptyMap(),
+    /**
+     * The voice assistant's profile per saved gateway (its URL). Absent: the assistant runs on the Chats profile, as it
+     * always has. Present: its calls run on that profile, which setup made and the Bots roster can edit.
+     */
+    val assistantProfiles: Map<String, String> = emptyMap(),
     /** The mic for dictation in the composer and on an empty chat. Off, it goes, and the model name gets the room. */
     val dictation: Boolean = true,
     val dictationEngine: DictationEngine = DictationEngine.Device,
@@ -209,6 +214,11 @@ data class AppSettings(
     val zoom: Int = 100,
     /** Desktop: the sidebar's width in dp, as its edge was last dragged to. */
     val sidebarWidth: Int = 304,
+    /**
+     * The Kanban board last opened on each gateway (gateway URL to board slug). Null/absent means the
+     * gateway's own `current` board; a board the gateway no longer has reads as unset.
+     */
+    val kanbanBoards: Map<String, String> = emptyMap(),
 )
 
 /** The Pebble's prompts until they're edited. */
@@ -239,6 +249,13 @@ fun AppSettings.showsSidebarPage(name: String): Boolean = sidebarNav && name !in
 /** [name]'s button (`SidebarPage.name`) shown or hidden in the sidebar's pages. */
 fun AppSettings.withSidebarPage(name: String, shown: Boolean): AppSettings =
     copy(sidebarNavHidden = if (shown) sidebarNavHidden - name else (sidebarNavHidden + name).distinct())
+
+/** The Kanban board last opened on [gateway]; null when none was pinned (the gateway's `current` board). */
+fun AppSettings.kanbanBoard(gateway: GatewayUrl): String? = kanbanBoards[gateway.value]
+
+/** [slug] (null: unpinned) becomes the Kanban board last opened on [gateway]. */
+fun AppSettings.withKanbanBoard(gateway: GatewayUrl, slug: String?): AppSettings =
+    copy(kanbanBoards = if (slug == null) kanbanBoards - gateway.value else kanbanBoards + (gateway.value to slug))
 
 /** The [AppSettings.startInstruction] a new chat starts with, trimmed; null when there is none or the settings aren't read yet. */
 fun SettingsStore.startInstruction(): String? = settings.value?.startInstruction?.trim()?.takeIf { it.isNotEmpty() }

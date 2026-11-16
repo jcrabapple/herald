@@ -1,5 +1,6 @@
 package dev.hermeskotlin.ui.preview
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,6 +44,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import dev.hermeskotlin.ui.chat.AttachSheet
+import dev.hermeskotlin.ui.chat.rememberAttachmentPicker
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import dev.hermeskotlin.designsystem.components.Toast
@@ -82,6 +88,12 @@ import dev.hermeskotlin.ui.sessions.InsightsView
 import dev.hermeskotlin.ui.sessions.JobEditorPage
 import dev.hermeskotlin.designsystem.components.SidebarLayout
 import dev.hermeskotlin.designsystem.components.rememberSidebarState
+import dev.hermeskotlin.designsystem.components.verticalScrollWithBar
+import dev.hermeskotlin.ui.widget.ChatsWidgetPreview
+import dev.hermeskotlin.ui.widget.KanbanWidgetPreview
+import dev.hermeskotlin.ui.widget.NowPreviewState
+import dev.hermeskotlin.ui.widget.NowWidgetPreview
+import dev.hermeskotlin.ui.widget.ScheduledWidgetPreview
 import dev.hermeskotlin.core.settings.ThemeMode
 import dev.hermeskotlin.ui.sessions.SessionsSidebarSample
 import dev.hermeskotlin.ui.sessions.BotsSidebarSample
@@ -98,6 +110,7 @@ import dev.hermeskotlin.ui.rooms.CreateRoomDialog
 import dev.hermeskotlin.ui.bots.BotEditor
 import dev.hermeskotlin.core.bots.BotDetails
 import dev.hermeskotlin.ui.plugins.PluginsView
+import dev.hermeskotlin.ui.kanban.KanbanView
 import dev.hermeskotlin.ui.assistant.AssistantBackdrop
 import dev.hermeskotlin.ui.assistant.AssistantCard
 import dev.hermeskotlin.ui.sessions.ProjectDraft
@@ -120,12 +133,15 @@ import dev.hermeskotlin.ui.update.LocalRenameOffer
 import dev.hermeskotlin.ui.update.RenameOffer
 import androidx.compose.ui.tooling.preview.Preview
 import com.composeunstyled.theme.ColorScheme
+import com.composeunstyled.theme.Theme
 import dev.hermeskotlin.core.chat.ChatState
 import dev.hermeskotlin.core.models.PickerScope
 import dev.hermeskotlin.core.settings.AppSettings
 import dev.hermeskotlin.core.settings.DEFAULT_ACCENT
 import dev.hermeskotlin.designsystem.AccentPalette
 import dev.hermeskotlin.designsystem.LocalAccentPalette
+import dev.hermeskotlin.designsystem.background
+import dev.hermeskotlin.designsystem.colors
 import dev.hermeskotlin.designsystem.hermesTheme
 import dev.hermeskotlin.ui.LocalAppSettings
 import dev.hermeskotlin.ui.chat.ChatView
@@ -178,6 +194,7 @@ enum class PreviewScene(val label: String) {
     ConfigSearch("A search across Hermes's settings"),
     ConfigPicker("Picking a voice, with Other… for one off the list"),
     Plugins("Plugins with a page"),
+    Kanban("Kanban boards and cards"),
     Assistant("The assistant, called up over another app"),
     AssistantAnswer("The assistant, after a question about the screen"),
     Scheduled("Scheduled jobs"),
@@ -194,6 +211,7 @@ enum class PreviewScene(val label: String) {
     GoalStrip("A chat with a goal, loop and heartbeat above the composer"),
     Comments("Comments on a reply"),
     MidTask("Typing while a task runs"),
+    Attachments("Opening attachments with the keyboard up"),
     ConnectionCheck("The connection check"),
     LongChat("A chat to scroll back through"),
     Tables("Tables in an answer"),
@@ -218,6 +236,7 @@ enum class PreviewScene(val label: String) {
     Connect("Connecting to a gateway that answered"),
     ConnectFailed("A gateway that didn't answer"),
     SignIn("Signing in"),
+    Widgets("The four home-screen widgets"),
 }
 
 /**
@@ -372,6 +391,12 @@ fun HeraldPreview(scene: PreviewScene, dark: Boolean = true, accent: String = DE
                 PreviewScene.Comments -> SampleChat(ChatSamples.reply, comments = remember { ChatSamples.comments() })
                 PreviewScene.LongChat -> SampleChat(ChatSamples.longChat)
                 PreviewScene.MidTask ->SampleChat(ChatSamples.working, composerText = "Also check the photos share")
+                PreviewScene.Attachments -> {
+                    var open by remember { mutableStateOf(false) }
+                    val picker = rememberAttachmentPicker(onPicked = {}, onError = {})
+                    SampleChat(ChatSamples.reply, composerText = "Here is the file", onAttach = { open = true })
+                    AttachSheet(visible = open, onDismiss = { open = false }, picker = picker)
+                }
                 PreviewScene.Offline -> SampleChat(ChatSamples.reply, offline = true)
                 PreviewScene.EmptyPage -> OpenSidebar {
                     SidebarPage {
@@ -423,6 +448,19 @@ fun HeraldPreview(scene: PreviewScene, dark: Boolean = true, accent: String = DE
                     onCancelBrowser = {},
                     onChangeGateway = {},
                 )
+                // The four home-screen widgets, drawn by the same preview composables the drift-guard
+                // tests render (D28): Now in its three states, then Chats, Tasks and Scheduled.
+                PreviewScene.Widgets -> Column(
+                    Modifier.fillMaxSize().verticalScrollWithBar().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    NowWidgetPreview(PageSamples.nowNeedsYou())
+                    NowWidgetPreview(PageSamples.nowRunning(), state = NowPreviewState.Running)
+                    NowWidgetPreview(PageSamples.nowQuiet(), state = NowPreviewState.Quiet)
+                    ChatsWidgetPreview(PageSamples.chatsWidget())
+                    KanbanWidgetPreview(PageSamples.kanbanWidget())
+                    ScheduledWidgetPreview(PageSamples.scheduledWidget())
+                }
                 PreviewScene.Loading -> OpenSidebar {
                     SidebarPage { InsightsView(InsightsUiState(), onBack = {}, onSelectPeriod = {}, onRetry = {}) }
                 }
@@ -509,6 +547,25 @@ fun HeraldPreview(scene: PreviewScene, dark: Boolean = true, accent: String = DE
                 }
                 PreviewScene.Plugins -> OpenSidebar {
                     SidebarPage { PluginsView(PluginsUiState(plugins = PageSamples.plugins), onBack = {}, onOpenPlugin = {}, onRetry = {}) }
+                }
+                PreviewScene.Kanban -> Box(
+                    Modifier.fillMaxSize().background(Theme[colors][background]).windowInsetsPadding(WindowInsets.safeDrawing),
+                ) {
+                    KanbanView(
+                        PageSamples.kanban(),
+                        remember { TextFieldState("") },
+                        onBack = {},
+                        onSelectBoard = {},
+                        onSearch = {},
+                        onTenant = {},
+                        onAssignee = {},
+                        onIncludeArchived = {},
+                        onOpenTask = {},
+                        onCloseTask = {},
+                        onRetry = {},
+                        onReloadDetail = {},
+                        onReloadLog = {},
+                    )
                 }
                 PreviewScene.Scheduled, PreviewScene.ScheduledJob -> OpenSidebar {
                     SidebarPage {
@@ -750,6 +807,7 @@ private fun SampleChat(
     /** An empty new chat's projects and profiles to pick from on its greeting. */
     places: GreetingPlaces? = null,
     cwd: String? = null,
+    onAttach: () -> Unit = {},
 ) {
     ChatView(
         title = state.title ?: "New chat",
@@ -773,7 +831,7 @@ private fun SampleChat(
         onNewChat = {},
         onOpenMenu = {},
         onOpenModels = {},
-        onAttach = {},
+        onAttach = onAttach,
         onDictate = {},
         onVoiceChat = {},
         onOpenPets = {},
