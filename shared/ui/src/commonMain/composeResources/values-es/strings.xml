@@ -135,6 +135,13 @@
     <string name="voice_pause_short">Corta</string>
     <string name="voice_pause_normal">Normal</string>
     <string name="voice_pause_long">Larga</string>
+    <string name="assistant_setup_tools_required">Activa al menos una herramienta para crear el asistente.</string>
+    <string name="assistant_setup_use_existing">Usar existente</string>
+    <string name="assistant_setup_create_new">Crear nuevo</string>
+    <string name="assistant_setup_use_existing_detail">Apunta el asistente a un perfil que ya está en el Gateway. Conserva su modelo, SOUL, habilidades y conjuntos de herramientas exactamente como están — no se escribe nada en el Gateway.</string>
+    <string name="assistant_setup_no_profiles">Aún no hay perfiles en el Gateway — crea uno nuevo en su lugar.</string>
+    <string name="assistant_setup_loading_profiles">Buscando perfiles…</string>
+    <string name="assistant_setup_use_profile">Usar este perfil</string>
     <string name="settings_notifications_anywhere">Notificaciones en cualquier lugar</string>
     <string name="settings_notifications_anywhere_detail">Recibe noticias de tus bots incluso fuera de la red de tu Gateway, cifradas de extremo a extremo a través de ntfy.sh. Instala el plugin herald-push en el Gateway. Mantiene una notificación silenciosa.</string>
     <string name="settings_notify_requests">Aprobaciones y preguntas</string>

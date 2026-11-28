@@ -135,6 +135,13 @@
     <string name="voice_pause_short">短</string>
     <string name="voice_pause_normal">正常</string>
     <string name="voice_pause_long">长</string>
+    <string name="assistant_setup_tools_required">请至少启用一个工具以创建助手。</string>
+    <string name="assistant_setup_use_existing">使用现有配置</string>
+    <string name="assistant_setup_create_new">新建</string>
+    <string name="assistant_setup_use_existing_detail">将助手指向网关上已有的配置文件。它会完全保留原有的模型、SOUL、技能和工具集 — 不会向网关写入任何内容。</string>
+    <string name="assistant_setup_no_profiles">网关上还没有配置文件 — 请改为新建一个。</string>
+    <string name="assistant_setup_loading_profiles">正在查找配置文件…</string>
+    <string name="assistant_setup_use_profile">使用此配置文件</string>
     <string name="settings_notifications_anywhere">随处通知</string>
     <string name="settings_notifications_anywhere_detail">即使不在网关所在的网络中，也能收到机器人的消息，经 ntfy.sh 端到端加密传送。会在网关上安装 herald-push 插件。会保留一条静默通知。</string>
     <string name="settings_notify_requests">批准与提问</string>

@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.composeunstyled.theme.ColorScheme
 import dev.hermeskotlin.core.auth.AuthApi
 import dev.hermeskotlin.core.auth.PersistentCookiesStorage
+import dev.hermeskotlin.core.bots.BotsApi
 import dev.hermeskotlin.core.connection.GatewayConnection
 import dev.hermeskotlin.core.gateway.ConnectionCheck
 import dev.hermeskotlin.core.gateway.GatewayProbe
@@ -103,7 +104,7 @@ class CallTargetPickerTest {
         val viewModel = SettingsViewModel(
             store, auth, probe, ConnectionCheck(probe, auth, { _, _ -> error("Unexpected socket") }),
             push, WallpaperStore(InMemoryBlobFile(), scope), ProfilesApi(client), SessionsApi(client),
-            NextPromptApi(client, PluginsApi(client)),
+            NextPromptApi(client, PluginsApi(client)), BotsApi(connection),
         )
         var selected: CallTarget? = null
         try {
