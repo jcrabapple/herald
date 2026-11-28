@@ -6,11 +6,13 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -35,13 +37,89 @@ data class GatewayEvent(
     val payload: JsonElement?,
     val sessionId: String?,
     val seq: Long?,
-)
+    /**
+     * The session authority's `execution_generation` of the turn the event belongs to, which it puts beside the
+     * payload rather than in it. Null on other gateways and on events outside a turn.
+     */
+    val executionGeneration: Long? = null,
+    /**
+     * The session authority's `admission_id` of the turn the event belongs to, beside the payload like
+     * [executionGeneration]: the id its `prompt.submit` gave the prompt that turn runs. Null on other gateways.
+     */
+    val admissionId: String? = null,
+    /**
+     * The session authority's `replay_epoch` of the session the event belongs to (gateway/session_events.py), which
+     * its [seq] counts in. Null on the legacy gateway, whose seqs count in `gateway.ready`'s epoch.
+     */
+    val replayEpoch: String? = null,
+) {
+    // Local to the receiving socket. The gateway's replay sequence is a separate counter.
+    internal var receiveOrder: Long = 0
+}
+
+/** A reconnect's events, handed to the chat in receive order while its attachment is prepared. */
+internal class ResumeBoundary {
+    data class Receipt(val runtimeId: String?, val receiveOrder: Long, val early: List<GatewayEvent>, val overflow: Boolean)
+    data class Handoff(val receiveOrder: Long, val events: List<GatewayEvent>)
+
+    var receipt: Receipt? = null
+        private set
+
+    @kotlin.concurrent.Volatile
+    var hasLaterTurn = false
+        private set
+
+    // Per session: the runtime is unknown until the reply, and another chat's traffic must not push this one's out.
+    private val early = mutableMapOf<String, ArrayDeque<GatewayEvent>>()
+    private val overflowed = mutableSetOf<String>()
+    private val after = mutableListOf<GatewayEvent>()
+
+    fun record(event: GatewayEvent, authority: Boolean) {
+        val sessionId = event.sessionId ?: return
+        val reply = receipt
+        if (reply != null) {
+            if (reply.runtimeId == sessionId) {
+                after += event
+                if (event.type == "message.start" || event.type == "message.complete") hasLaterTurn = true
+            }
+        } else if (authority || event.type == "message.start" || event.type == "message.complete") {
+            val frames = early.getOrPut(sessionId) { ArrayDeque() }
+            if (frames.size == EARLY_EVENT_LIMIT) {
+                frames.removeFirst()
+                overflowed += sessionId
+            }
+            frames.addLast(event)
+        }
+    }
+
+    fun answered(result: JsonElement, receiveOrder: Long) {
+        val runtimeId = ((result as? JsonObject)?.get("session_id") as? JsonPrimitive)?.contentOrNull
+        receipt = Receipt(runtimeId, receiveOrder, early[runtimeId]?.toList().orEmpty(), runtimeId in overflowed)
+        early.clear()
+        overflowed.clear()
+    }
+
+    fun handoff(): Handoff {
+        val last = after.lastOrNull()?.receiveOrder ?: receipt?.receiveOrder ?: 0
+        return Handoff(last, after.toList())
+    }
+
+    private companion object {
+        const val EARLY_EVENT_LIMIT = 64
+    }
+}
 
 /**
  * JSON-RPC error returned by the gateway. [reason] is the machine-readable cause some errors carry in
  * `data.reason` (`SESSION_NOT_OWNED` on a 4090, a delivery failure class), so callers needn't read prose.
  */
-class RpcException(val code: Int, override val message: String, val reason: String? = null) : Exception(message)
+class RpcException(
+    val code: Int,
+    override val message: String,
+    val reason: String? = null,
+    /** The error's whole `data` object, for errors that carry more than [reason] (a refusal's fresh fences). */
+    val data: JsonObject? = null,
+) : Exception(message)
 
 /**
  * No reply to [method] within its timeout. The call went out, so the gateway may still have acted on it.
@@ -76,12 +154,15 @@ data class SentRequest(val method: String, val sessionId: String?, val atMillis:
  *
  * Call [run] to pump the socket; it returns only by throwing (closed, heartbeat timeout).
  * On `gateway.ready` it advertises `client.capabilities {server_requests: true}` and, when the server
- * offers it, starts the `gateway.ping` heartbeat (15 s interval, 45 s inbound deadline).
+ * offers it, starts the `gateway.ping` heartbeat (15 s interval, 45 s inbound deadline; 60 s and 150 s while
+ * [setIdle], so a phone with the screen off isn't woken every few seconds).
  */
 class JsonRpcClient(
     private val transport: RpcTransport,
     private val heartbeatIntervalMs: Long = 15_000,
     private val heartbeatDeadlineMs: Long = 45_000,
+    private val idleHeartbeatIntervalMs: Long = 60_000,
+    private val idleHeartbeatDeadlineMs: Long = 150_000,
     private val clock: () -> Long = { getTimeMillis() },
     /**
      * The server→client request methods this app can show. Any other is declined ([SESSION_NOT_SHOWN]),
@@ -93,7 +174,10 @@ class JsonRpcClient(
 
     /** Held by the one request over [LARGE_FRAME_CHARS] that's out, from sending it to its reply. */
     private val largeFrames = Mutex()
-    private val pending = mutableMapOf<String, CompletableDeferred<JsonElement>>()
+    private class PendingCall(val reply: CompletableDeferred<JsonElement>, val boundary: ResumeBoundary?)
+    private val pending = mutableMapOf<String, PendingCall>()
+    private val resumeBoundaries = mutableSetOf<ResumeBoundary>()
+    private var receivedEvents = 0L
     private val pendingMutex = Mutex()
     /** Taken only under [pendingMutex]: callers run on several threads, and a shared id hands one caller another's reply. */
     private var nextId = 0L
@@ -102,6 +186,11 @@ class JsonRpcClient(
     private var nextPing = 0L
     @kotlin.concurrent.Volatile private var lastInboundAt = clock()
     private var heartbeatJob: Job? = null
+    @kotlin.concurrent.Volatile private var idle = false
+    /** When the heartbeat last went back to its short deadline, which only counts silence from then on. */
+    @kotlin.concurrent.Volatile private var activeSince = 0L
+    /** Wakes the heartbeat when [setIdle] changes, so coming back pings at once instead of after a long wait. */
+    private val idleChanged = Channel<Unit>(Channel.CONFLATED)
 
     /** The gateway counts a [SESSION_NOT_SHOWN] decline instead of taking it as the answer (`client.capabilities`). */
     @kotlin.concurrent.Volatile private var declinesNotShown = false
@@ -142,7 +231,22 @@ class JsonRpcClient(
     @kotlin.concurrent.Volatile var sessionAuthority = false
         private set
 
+    /** Older gateways can reject reactions. Remember the verdict for all chats on this socket. */
+    private val _replyReactionsSupported = MutableStateFlow(true)
+    internal val replyReactionsSupported = _replyReactionsSupported.asStateFlow()
+
+    internal fun markReplyReactionsUnsupported() {
+        _replyReactionsSupported.value = false
+    }
+
     private val authorityRequests = AuthorityRequests()
+
+    /**
+     * The `subscription_id` the session authority attached the chat [sessionId] to this socket with, which
+     * `session.detach` names; null off the authority, or for a chat this socket hasn't opened.
+     */
+    suspend fun subscriptionOf(sessionId: String): String? =
+        if (sessionAuthority) authorityRequests.subscription(sessionId) else null
 
     suspend fun run(): Nothing = coroutineScope {
         try {
@@ -169,17 +273,33 @@ class JsonRpcClient(
         }
     }
 
-    suspend fun request(method: String, params: JsonObject = JsonObject(emptyMap()), timeoutMs: Long = 30_000): JsonElement {
-        if (!sessionAuthority) return call(method, params, timeoutMs)
-        val sent = authorityRequests.prepare(method, params)
-        return call(method, sent, timeoutMs).also { authorityRequests.answered(method, sent, it) }
+    suspend fun request(method: String, params: JsonObject = JsonObject(emptyMap()), timeoutMs: Long = 30_000): JsonElement =
+        request(method, params, timeoutMs, null)
+
+    internal suspend fun resumeAtBoundary(params: JsonObject, boundary: ResumeBoundary): JsonElement =
+        request("session.resume", params, 30_000, boundary)
+
+    internal suspend fun endResume(boundary: ResumeBoundary): ResumeBoundary.Handoff = pendingMutex.withLock {
+        resumeBoundaries.remove(boundary)
+        boundary.handoff()
     }
 
-    private suspend fun call(method: String, params: JsonObject, timeoutMs: Long): JsonElement {
+    private suspend fun request(
+        method: String, params: JsonObject, timeoutMs: Long, boundary: ResumeBoundary?,
+    ): JsonElement {
+        if (!sessionAuthority) return call(method, params, timeoutMs, boundary)
+        val sent = authorityRequests.prepare(method, params)
+        return call(method, sent, timeoutMs, boundary).also { authorityRequests.answered(method, sent, it) }
+    }
+
+    private suspend fun call(method: String, params: JsonObject, timeoutMs: Long, boundary: ResumeBoundary?): JsonElement {
         // Nothing will answer on a link that is gone; say so now rather than after the timeout.
         closedWith?.let { throw it }
         val deferred = CompletableDeferred<JsonElement>()
-        val id = pendingMutex.withLock { "c${++nextId}".also { pending[it] = deferred } }
+        val id = pendingMutex.withLock {
+            if (boundary != null) resumeBoundaries += boundary
+            "c${++nextId}".also { pending[it] = PendingCall(deferred, boundary) }
+        }
         try {
             val frame = encode(buildJsonObject {
                 put("jsonrpc", "2.0")
@@ -227,19 +347,23 @@ class JsonRpcClient(
             method == "event" -> handleEvent(frame["params"] as? JsonObject ?: return, scope)
             method != null && id != null -> handleServerRequest(id, method, frame["params"])
             id != null -> {
-                val deferred = pendingMutex.withLock { pending.remove(id) } ?: return
                 val error = frame["error"] as? JsonObject
+                val result = frame["result"] ?: JsonNull
+                val call = pendingMutex.withLock {
+                    pending.remove(id)?.also { if (error == null) it.boundary?.answered(result, receivedEvents) }
+                } ?: return
                 if (error != null) {
-                    deferred.completeExceptionally(
+                    call.reply.completeExceptionally(
                         RpcException(
                             error["code"]?.jsonPrimitive?.intOrNull ?: -32000,
                             error["message"]?.jsonPrimitive?.contentOrNull ?: "RPC error",
                             ((error["data"] as? JsonObject)?.get("reason") as? JsonPrimitive)
                                 ?.takeIf { it.isString }?.contentOrNull,
+                            error["data"] as? JsonObject,
                         ),
                     )
                 } else {
-                    deferred.complete(frame["result"] ?: JsonNull)
+                    call.reply.complete(result)
                 }
             }
         }
@@ -260,14 +384,19 @@ class JsonRpcClient(
             sessionAuthority = (readyPayload["session_authority"] as? JsonPrimitive)?.booleanOrNull == true
             ready.complete(readyPayload)
         }
-        _events.emit(
-            GatewayEvent(
-                type = type,
-                payload = payload,
-                sessionId = params["session_id"]?.jsonPrimitive?.contentOrNull,
-                seq = params["seq"]?.jsonPrimitive?.longOrNull,
-            ),
-        )
+        val event = GatewayEvent(
+            type = type,
+            payload = payload,
+            sessionId = params["session_id"]?.jsonPrimitive?.contentOrNull,
+            seq = params["seq"]?.jsonPrimitive?.longOrNull,
+            executionGeneration = (params["execution_generation"] as? JsonPrimitive)?.longOrNull,
+            admissionId = (params["admission_id"] as? JsonPrimitive)?.contentOrNull,
+            replayEpoch = (params["replay_epoch"] as? JsonPrimitive)?.contentOrNull,
+        ).also { it.receiveOrder = ++receivedEvents }
+        if (event.sessionId != null) {
+            pendingMutex.withLock { resumeBoundaries.forEach { it.record(event, sessionAuthority) } }
+        }
+        _events.emit(event)
     }
 
     private suspend fun handleServerRequest(id: String, method: String, params: JsonElement?) {
@@ -293,15 +422,30 @@ class JsonRpcClient(
         })
     }
 
+    /**
+     * Whether nobody is looking (on a phone: the app out of sight or the screen off). Idle, the heartbeat pings
+     * less often and waits longer before it gives up; back from idle it pings at once, to find a link that died
+     * meanwhile.
+     */
+    fun setIdle(idle: Boolean) {
+        if (this.idle == idle) return
+        if (!idle) activeSince = clock()
+        this.idle = idle
+        idleChanged.trySend(Unit)
+    }
+
     private fun startHeartbeat(scope: CoroutineScope) {
         if (heartbeatJob?.isActive == true) return
         heartbeatJob = scope.launch {
             while (isActive) {
-                delay(heartbeatIntervalMs)
-                if (clock() - lastInboundAt > heartbeatDeadlineMs) {
+                val woken = withTimeoutOrNull(if (idle) idleHeartbeatIntervalMs else heartbeatIntervalMs) { idleChanged.receive() } != null
+                val deadline = if (idle) idleHeartbeatDeadlineMs else heartbeatDeadlineMs
+                if (clock() - maxOf(lastInboundAt, if (idle) 0L else activeSince) > deadline) {
                     runCatching { transport.close(GOING_AWAY, "heartbeat timeout") }
                     throw HeartbeatTimeoutException()
                 }
+                // Going idle needs no ping: the next one comes after the longer wait.
+                if (woken && idle) continue
                 // Fire-and-forget: any inbound frame (including the pong) counts as liveness.
                 runCatching {
                     send(buildJsonObject {
@@ -330,8 +474,11 @@ class JsonRpcClient(
     }
 
     private suspend fun failPending(cause: Throwable) {
-        val calls = pendingMutex.withLock { pending.values.toList().also { pending.clear() } }
-        calls.forEach { it.completeExceptionally(cause) }
+        val calls = pendingMutex.withLock {
+            resumeBoundaries.clear()
+            pending.values.toList().also { pending.clear() }
+        }
+        calls.forEach { it.reply.completeExceptionally(cause) }
     }
 
     companion object {

@@ -143,3 +143,5 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(libs.kotlinx.coroutines.test)
 }
+
+apply(from = rootProject.file("gradle/robolectric.gradle.kts"))

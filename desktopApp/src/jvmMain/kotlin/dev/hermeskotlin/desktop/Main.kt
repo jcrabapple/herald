@@ -11,6 +11,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
@@ -33,11 +34,32 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.toAwtImage
 import androidx.compose.ui.unit.LayoutDirection
+import dev.hermeskotlin.core.bots.BotsApi
 import dev.hermeskotlin.core.chat.AppLink
 import dev.hermeskotlin.core.chat.ChatHost
 import dev.hermeskotlin.core.chat.ChatLinks
+import dev.hermeskotlin.core.chat.ChatSession
 import dev.hermeskotlin.core.chat.InputAnswers
+import dev.hermeskotlin.core.gateway.GatewayRepository
+import dev.hermeskotlin.core.inbox.InboxLinks
+import dev.hermeskotlin.core.inbox.InboxRun
+import dev.hermeskotlin.core.inbox.InboxStore
+import dev.hermeskotlin.core.push.NtfyClient
+import dev.hermeskotlin.core.push.PushApi
+import dev.hermeskotlin.core.push.PushKeys
+import dev.hermeskotlin.core.push.PushMessage
+import dev.hermeskotlin.core.phone.PhoneToolsBridge
+import dev.hermeskotlin.core.push.PushSetup
+import dev.hermeskotlin.core.push.linuxPushInbox
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -102,7 +124,7 @@ internal fun followSystemAppearance(osName: String?) {
 }
 
 /** A chat in a window of its own; [raise] goes up when it's asked for again. */
-private data class PoppedChat(val target: ChatTarget, val key: Int, val raise: Int = 0)
+private data class PoppedChat(val target: ChatTarget, val key: Int, val raise: Int = 0, val raiseGuard: (() -> Boolean)? = null)
 
 fun main(args: Array<String>) {
     followSystemAppearance(System.getProperty("os.name"))
@@ -120,7 +142,10 @@ fun main(args: Array<String>) {
     // A second launch brings the running Herald forward, with its link, instead of opening another.
     val flatpak = inFlatpak
     val restartWait = if (flatpak && args.contentEquals(arrayOf("--restart"))) 30_000L else 0L
-    val instance = SingleInstance.claim(appDataDir, launchLink, restartWait) ?: exitProcess(if (restartWait > 0) 1 else 0)
+    val quietLaunch = backgroundInvocation(args, flatpak)
+    val instance = SingleInstance.claim(appDataDir, launchLink, restartWait, foreground = !quietLaunch) ?: exitProcess(if (restartWait > 0) 1 else 0)
+    // Asked after the hand-off: a launch that only reaches the running one needn't start AWT.
+    val startupCapable = flatpak && java.awt.SystemTray.isSupported()
     // Linux's light or dark preference, which Compose reads only once there: this follows it as it changes. Asked
     // for now, so the answer comes in while the storage and the settings are read.
     val colorScheme = if (System.getProperty("os.name") == "Linux") LinuxColorScheme({ SystemColorScheme.dark = it }) else null
@@ -140,6 +165,13 @@ fun main(args: Array<String>) {
     // Waited for briefly, so the first frame is in the right theme; a desktop that can't say leaves it to Compose.
     colorScheme?.awaitFirst(1_000)
     val links = koin.get<ChatLinks>()
+    koin.get<PushSetup>().start()
+    if (Jcef.available) koin.get<PhoneToolsBridge>().start()
+    val portal = BackgroundPortal()
+    // The choice the desktop last confirmed, from the app's own store: a portal still starting at login doesn't hold
+    // up the window or decide whether it shows.
+    val startup = if (startupCapable) runBlocking { BackgroundStartup.load(koin.get(), portal::request) } else null
+    val startHidden = startup != null && backgroundLaunch(args, startup.state.value.choice, startupCapable)
     val saved = WindowMemory.read(koin.get())
     // The same mark as docs/logo.svg, for the title bar, the taskbar and the tray.
     val icon = Thread.currentThread().contextClassLoader.getResourceAsStream("herald.svg")!!.use { loadSvgPainter(it, Density(1f)) }
@@ -152,18 +184,28 @@ fun main(args: Array<String>) {
         val shortcuts = remember { ShortcutBus() }
         val back = remember { DesktopBack() }
         val settings = settingsStore.settings.collectAsState().value ?: AppSettings()
-        var windowShown by remember { mutableStateOf(true) }
+        var windowShown by remember { mutableStateOf(!startHidden) }
+        // Offered once the portal answers. At login it may still be starting, and a later launch only reaches this
+        // instance, so it's asked again for a while rather than leaving no way to turn startup off until Quit.
+        var startupControl by remember { mutableStateOf<BackgroundStartup?>(null) }
+        val startupState = startupControl?.state?.collectAsState()?.value
+        LaunchedEffect(Unit) {
+            if (startup != null && awaitPortal(portal::available)) startupControl = startup
+        }
         var frame by remember { mutableStateOf<Frame?>(null) }
         val focused = remember { MutableStateFlow(false) }
         var quickOpen by remember { mutableStateOf(false) }
         var quickRaise by remember { mutableStateOf(0) }
         // Bumped by every show(): once the window is visible, Linux asks the window manager to activate it.
         var windowRaise by remember { mutableStateOf(0) }
+        var launcherRaiseGuard by remember { mutableStateOf<(() -> Boolean)?>(null) }
         val tray = rememberTrayState()
         // The chat the last notification was about, which a click on it opens.
         var lastNotice by remember { mutableStateOf<DesktopNotice?>(null) }
+        var lastLinuxOwner by remember { mutableStateOf<LinuxNoticeOwner?>(null) }
 
         fun show() {
+            launcherRaiseGuard = null
             windowShown = true
             windowRaise++
             frame?.let {
@@ -189,6 +231,108 @@ fun main(args: Array<String>) {
                 onCancel = controller::cancel, onRestart = controller::restart, onDismiss = controller::dismiss)
         }
         val host = remember { koin.get<ChatHost>() }
+        val approveOnce = stringResource(Res.string.notice_approve_once)
+        val deny = stringResource(Res.string.notice_deny)
+        val noticeLabels = rememberUpdatedState(approveOnce to deny)
+        val linuxNotices = remember {
+            if (System.getProperty("os.name") != "Linux") null else {
+                lateinit var notices: LinuxNotifications
+                val delivery = PortalNotificationDelivery(
+                    onAction = { id, action -> notices.action(id, action) },
+                    onFailure = { id, action -> notices.failed(id, action) },
+                    onUnavailable = { notices.unavailable() },
+                )
+                notices = LinuxNotifications(delivery, actionLabels = { noticeLabels.value }, fallback = { notice, owner ->
+                    lastLinuxOwner = owner
+                    tray.sendNotification(Notification(notice.title, notice.body, Notification.Type.None))
+                }) { settingsStore.settings.value ?: AppSettings() }
+                notices
+            }
+        }
+        DisposableEffect(linuxNotices) { onDispose { linuxNotices?.close() } }
+        LaunchedEffect(settings) { linuxNotices?.reconcile() }
+        LaunchedEffect(Unit) { host.ownerVersion.collectLatest { linuxNotices?.reconcile() } }
+        LaunchedEffect(Unit) { koin.get<PushApi>().registrations.collectLatest { linuxNotices?.reconcile() } }
+
+        val connection = remember { koin.get<GatewayConnection>() }
+        val pushInbox = remember { linuxPushInbox(koin.get<PushKeys>()) }
+        LaunchedEffect(pushInbox) {
+            val inbox = pushInbox ?: return@LaunchedEffect
+            val gateways = koin.get<GatewayRepository>()
+            val api = koin.get<PushApi>()
+            val ntfy = koin.get<NtfyClient>()
+            val watches = combine(settingsStore.settings, gateways.list, host.ownerVersion, api.registrations) { prefs, saved, version, registration ->
+                saved.current?.takeIf { prefs?.pushAnywhere == true }?.let { PushWatch(it.gatewayUrl.value, version, registration) }
+            }.stateIn(this, SharingStarted.Eagerly, null)
+            val bots = koin.get<BotsApi>()
+            val hiddenBots = DesktopPushBots(koin.get())
+            launch {
+                combine(watches, connection.state) { watch, state ->
+                    watch?.takeIf { state is ConnectionState.Connected && connection.isConnectedTo(it.gatewayUrl) }?.gatewayUrl
+                }.distinctUntilChanged().collectLatest { url ->
+                    if (url != null) {
+                        val socket = connection.state.value
+                        hiddenBots.refresh(url, bots) { watches.value?.gatewayUrl == url && connection.isConnectedTo(url) && connection.state.value === socket }
+                    }
+                }
+            }
+            DesktopPush(watches, inbox, { sub, connected ->
+                ntfy.subscribe(sub.server, sub.topic, sub.sinceSeconds, connected)
+            }, { watch, sub, message, title ->
+                fun owned() = watches.value == watch && settingsStore.settings.value?.pushAnywhere == true &&
+                    gateways.list.value.current?.gatewayUrl?.value == watch.gatewayUrl &&
+                    host.ownerVersion.value == watch.ownerVersion && api.registrations.value == watch.registration
+                val isReply = message.type == PushMessage.BOT_MESSAGE
+                fun current() = owned() && (!isReply || settingsStore.settings.value?.notifyReplies == true)
+                fun foreground() = focused.value && connection.isConnectedTo(watch.gatewayUrl)
+                val hidden = if (isReply && !foreground() && current()) {
+                    val socket = connection.state.value
+                    if (connection.isConnectedTo(watch.gatewayUrl)) {
+                        hiddenBots.refresh(watch.gatewayUrl, bots) { current() && connection.isConnectedTo(watch.gatewayUrl) && connection.state.value === socket }
+                    }
+                    hiddenBots.names(watch.gatewayUrl)
+                } else null
+                val projected = desktopPushNotice(message, ::current, title, foreground(), hiddenBots = hidden)
+                    ?: return@DesktopPush
+                val owner = LinuxNoticeOwner(watch.gatewayUrl, projected.profile, ::current, open = {
+                    val source = host.session.value
+                    scope.launch {
+                        val trusted = withContext(Dispatchers.IO) { runCatching { inbox.current(sub) }.getOrDefault(false) }
+                        if (!trusted || !current()) return@launch
+                        val mapped = frame?.takeIf { windowShown && it.isShowing && it.extendedState and Frame.ICONIFIED == 0 }
+                        show()
+                        if (mapped != null) LinuxWindowActivation.request(mapped) else launcherRaiseGuard = ::current
+                        if (projected.destination != null) shortcuts.fire(Shortcut.RevealNotice(source, ::current) {
+                            if (current()) when (val destination = projected.destination) {
+                                is PushDestination.Bot -> links.openOwnedBot(destination.name, destination.label, destination.session, ::current)
+                                is PushDestination.Inbox -> koin.get<InboxLinks>().open(destination.key, ::current)
+                            }
+                        })
+                    }
+                }, usesReplyPreference = isReply, answer = {})
+                linuxNotices?.post(projected.notice, owner, fromPush = isReply)
+            }, persist = { url, message ->
+                InboxRun.from(message)?.let { run -> koin.get<InboxStore>().receive(url, run).nameOf(run) }
+            }, status = { detail ->
+                koin.get<PushSetup>().reportReceiver(detail)
+                linuxNotices?.reconcile()
+            }).start(this)
+        }
+
+        fun linuxPost(notice: DesktopNotice, owned: () -> Boolean, open: (ChatSession, () -> Boolean) -> Unit) {
+            val origin = notice.origin ?: return
+            val source = origin.session
+            fun valid() = owned() && origin.current() && (settingsStore.settings.value ?: AppSettings()).let {
+                if (notice.request == null) it.notifyReplies else it.notifyRequests
+            } &&
+                (notice.request == null || source.state.value.inputRequests.any { it == notice.request })
+            val owner = LinuxNoticeOwner(source.gateway.value, source.profile, ::valid, { open(source, ::valid) }) { choice ->
+                scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                    if (valid()) notice.request?.let { source.answer(it, InputAnswers.approval(choice)) }
+                }
+            }
+            linuxNotices?.post(notice, owner)
+        }
 
         /**
          * Follows a `herald://` link. A notification's Approve or Deny answers its approval where it waits, without
@@ -234,7 +378,6 @@ fun main(args: Array<String>) {
             }
         }
         // Back from sleep (the clock jumped) or back at the window, a connection waiting out its backoff tries now.
-        val connection = remember { koin.get<GatewayConnection>() }
         LaunchedEffect(Unit) {
             var last = System.currentTimeMillis()
             while (true) {
@@ -247,14 +390,8 @@ fun main(args: Array<String>) {
         // Chats opened in windows of their own, each with its own key so closing one keeps the others' state.
         val chatWindows = remember { mutableStateListOf<PoppedChat>() }
         var nextWindow by remember { mutableStateOf(0) }
-        val approveOnce = stringResource(Res.string.notice_approve_once)
-        val deny = stringResource(Res.string.notice_deny)
-        val post: (DesktopNotice) -> Unit = { notice ->
-            lastNotice = notice
-            // Windows' own notification where it can be had (it has buttons and stays in the Action Center);
-            // otherwise the tray's.
-            if (!WindowsToasts.show(notice, approveOnce, deny)) tray.sendNotification(Notification(notice.title, notice.body, Notification.Type.None))
-            // The taskbar button flashes (the Dock icon bounces once) until the user comes back.
+        // The taskbar button flashes (the Dock icon bounces once) until the user comes back.
+        fun askForAttention() {
             if (!focused.value) runCatching {
                 if (Taskbar.isTaskbarSupported()) {
                     val taskbar = Taskbar.getTaskbar()
@@ -266,7 +403,26 @@ fun main(args: Array<String>) {
                 }
             }
         }
-        LaunchedEffect(Unit) { DesktopNotifier(koin.get(), settingsStore, focused, post).start(this) }
+        val post: (DesktopNotice) -> Unit = { notice ->
+            lastNotice = notice
+            // Windows' own notification where it can be had (it has buttons and stays in the Action Center);
+            // otherwise the tray's.
+            if (linuxNotices != null) linuxPost(notice, { host.session.value === notice.origin?.session }) { source, current ->
+                // Activate during this user action, before revealing its chat dismisses another page.
+                val mapped = frame?.takeIf { windowShown && it.isShowing && it.extendedState and Frame.ICONIFIED == 0 }
+                show()
+                if (mapped != null) {
+                    if (current()) LinuxWindowActivation.request(mapped)
+                } else {
+                    launcherRaiseGuard = current
+                    // show() already requested activation.
+                }
+                shortcuts.fire(Shortcut.RevealChat(source, current))
+            }
+            else if (!WindowsToasts.show(notice, approveOnce, deny)) tray.sendNotification(Notification(notice.title, notice.body, Notification.Type.None))
+            askForAttention()
+        }
+        LaunchedEffect(Unit) { DesktopNotifier(koin.get(), settingsStore, focused, post) { linuxNotices?.reconcile() }.start(this) }
         // The global shortcut from any app, while the setting is on.
         DisposableEffect(settings.quickEntry) {
             var disposed = false
@@ -288,9 +444,13 @@ fun main(args: Array<String>) {
             tooltip = TITLE,
             // A double-click on the icon, or a click on a notification: the window, at that notification's chat.
             onAction = {
-                show()
-                lastNotice?.sessionId?.let { links.open(it, lastNotice?.chatTitle) }
+                // A Linux notice's own open shows the window it came from: this one, or its chat's own, which the
+                // main window mustn't then come forward over.
+                val linuxOwner = lastLinuxOwner?.takeIf { linuxNotices != null && it.current() }
+                if (linuxOwner != null) linuxOwner.open() else show()
+                if (linuxNotices == null) lastNotice?.sessionId?.let { links.open(it, lastNotice?.chatTitle) }
                 lastNotice = null
+                lastLinuxOwner = null
             },
             menu = {
                 Item(stringResource(Res.string.tray_open), onClick = ::show)
@@ -300,6 +460,13 @@ fun main(args: Array<String>) {
                 }
                 Item(stringResource(Res.string.tray_quick_entry), onClick = { quickOpen = true; quickRaise++ })
                 Separator()
+                val control = startupControl
+                if (control != null && startupState != null) {
+                    CheckboxItem(stringResource(Res.string.startup_at_login), checked = startupState.choice != StartupChoice.Off,
+                        enabled = !startupState.busy, onCheckedChange = { on -> scope.launch { control.set(on) } })
+                    startupState.message?.let { Item(stringResource(it.text), enabled = false, onClick = {}) }
+                    Separator()
+                }
                 Item(stringResource(Res.string.tray_quit), onClick = ::exitApplication)
             },
         )
@@ -330,7 +497,10 @@ fun main(args: Array<String>) {
             dialogOwner = window
             frame = window
             LaunchedEffect(windowRaise) {
-                if (windowRaise != 0) SwingUtilities.invokeLater { LinuxWindowActivation.request(window) }
+                if (windowRaise != 0) {
+                    val current = launcherRaiseGuard
+                    SwingUtilities.invokeLater { if (current?.invoke() != false) LinuxWindowActivation.request(window) }
+                }
             }
             // Narrow enough for Windows' snap layouts (a third of a screen), where the sidebar folds into a drawer;
             // past that, things would only be cut off.
@@ -339,7 +509,10 @@ fun main(args: Array<String>) {
             LaunchedEffect(windowFocused, windowShown) {
                 focused.value = windowFocused && windowShown
                 // Back in the window, the user has seen what's new: a later tray click shouldn't jump to an old chat.
-                if (focused.value) lastNotice = null
+                if (focused.value) {
+                    lastNotice = null
+                    lastLinuxOwner = null
+                }
                 if (focused.value && connection.state.value is ConnectionState.Reconnecting) connection.retry()
             }
             val titleBar = DesktopTitleBar.rememberFor(window)
@@ -356,7 +529,7 @@ fun main(args: Array<String>) {
                         is Shortcut.PopOut -> {
                             val id = shortcut.target.storedSessionId ?: return@ShortcutHandler false
                             val open = chatWindows.indexOfFirst { it.target.storedSessionId == id }
-                            if (open >= 0) chatWindows[open] = chatWindows[open].let { it.copy(raise = it.raise + 1) }
+                            if (open >= 0) chatWindows[open] = chatWindows[open].let { it.copy(raise = it.raise + 1, raiseGuard = null) }
                             else chatWindows += PoppedChat(shortcut.target, nextWindow++)
                             true
                         }
@@ -392,7 +565,7 @@ fun main(args: Array<String>) {
                         // A chat already in a window of its own comes forward there rather than open twice.
                         val other = next.storedSessionId?.let { id -> chatWindows.indexOfFirst { it.target.storedSessionId == id } } ?: -1
                         when {
-                            other >= 0 -> chatWindows[other] = chatWindows[other].let { it.copy(raise = it.raise + 1) }
+                            other >= 0 -> chatWindows[other] = chatWindows[other].let { it.copy(raise = it.raise + 1, raiseGuard = null) }
                             at >= 0 -> chatWindows[at] = chatWindows[at].copy(target = next)
                         }
                     },
@@ -400,9 +573,24 @@ fun main(args: Array<String>) {
                     icon = icon,
                     mac = mac,
                     onShowMain = ::show,
-                    onPost = post,
-                    onClose = { chatWindows.removeAll { it.key == popped.key } },
+                    onPost = { notice ->
+                        if (linuxNotices == null) post(notice) else {
+                            linuxPost(notice,
+                                // The window outlives a profile switch in the main window, so its notices do too: it
+                                // closes with its gateway, and its own host says when its chat is replaced.
+                                owned = { host.session.value?.gateway == notice.origin?.session?.gateway && chatWindows.any { it.key == popped.key } },
+                                open = { _, current ->
+                                    val at = chatWindows.indexOfFirst { it.key == popped.key }
+                                    if (at >= 0) chatWindows[at] = chatWindows[at].let { it.copy(raise = it.raise + 1, raiseGuard = current) }
+                                },
+                            )
+                            askForAttention()
+                        }
+                    },
+                    onClose = { chatWindows.removeAll { it.key == popped.key }; linuxNotices?.reconcile() },
+                    onNoticeChange = { linuxNotices?.reconcile() },
                     raise = popped.raise,
+                    raiseGuard = popped.raiseGuard,
                 )
             }
         }

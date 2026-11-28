@@ -115,6 +115,7 @@ import com.composables.icons.lucide.Brain
 import com.composables.icons.lucide.Cat
 import com.composables.icons.lucide.ChevronRight
 import com.composables.icons.lucide.Clock
+import com.composables.icons.lucide.ExternalLink
 import com.composables.icons.lucide.Gauge
 import com.composables.icons.lucide.Globe
 import com.composables.icons.lucide.Image
@@ -122,6 +123,7 @@ import com.composables.icons.lucide.Download
 import com.composables.icons.lucide.LayoutGrid
 import com.composables.icons.lucide.Languages
 import androidx.compose.runtime.saveable.rememberSaveable
+import dev.hermeskotlin.ui.gateways.savedLabel
 import dev.hermeskotlin.ui.LanguagePageReturn
 import dev.hermeskotlin.ui.rememberLanguageChoice
 import com.composables.icons.lucide.Lightbulb
@@ -146,6 +148,7 @@ import com.composeunstyled.Text
 import com.composeunstyled.UnstyledIcon
 import com.composeunstyled.theme.Theme
 import dev.hermeskotlin.designsystem.rememberHoverIndication
+import dev.hermeskotlin.core.gateway.HermesVersion
 import dev.hermeskotlin.core.gateway.SavedGateway
 import dev.hermeskotlin.core.bots.Bot
 import dev.hermeskotlin.core.phone.enabledPhoneTools
@@ -195,6 +198,7 @@ import dev.hermeskotlin.designsystem.text
 import dev.hermeskotlin.designsystem.textMuted
 import dev.hermeskotlin.designsystem.textSecondary
 import dev.hermeskotlin.designsystem.textTertiary
+import dev.hermeskotlin.designsystem.warning
 import dev.hermeskotlin.designsystem.title
 import dev.hermeskotlin.designsystem.typography
 import dev.hermeskotlin.ui.bots.BotFaces
@@ -225,6 +229,11 @@ import dev.hermeskotlin.ui.SidebarPage
 import dev.hermeskotlin.core.bots.SidebarMode
 import com.composables.icons.lucide.LayoutList
 import dev.hermeskotlin.ui.update.UpdateBanner
+import dev.hermeskotlin.core.phone.PhoneTool
+import dev.hermeskotlin.core.phone.PhoneToolsBridge
+import dev.hermeskotlin.core.phone.PhoneToolsStatus.State
+import dev.hermeskotlin.ui.chat.agentScreenRendererAvailable
+import org.koin.compose.koinInject
 import org.koin.compose.viewmodel.koinViewModel
 import kotlin.math.roundToInt
 import androidx.compose.foundation.text.KeyboardOptions
@@ -277,6 +286,7 @@ fun SettingsScreen(
     // Saveable, and open again after a pick redraws the screens, so a new language shows on the page it was picked on.
     var languageOpen by rememberSaveable { mutableStateOf(LanguagePageReturn.take()) }
     var connectedDevicesOpen by remember { mutableStateOf(false) }
+    var creditsOpen by remember { mutableStateOf(false) }
     // Read again when the App icon page closes, so its row names the icon just applied.
     val appIcons = key(appIconOpen) { rememberAppIcons() }
     val language = rememberLanguageChoice()
@@ -285,21 +295,22 @@ fun SettingsScreen(
     var assistantBusy by remember { mutableStateOf(false) }
     var assistantError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(gateway, profile) { viewModel.bind(gateway, profile) }
-    PlatformBackHandler(enabled = !checkOpen && !phoneToolsOpen && !appIconOpen && !startInstructionOpen && !callTargetOpen && !languageOpen && !connectedDevicesOpen && !sidebarPagesOpen && !assistantSetupOpen, onBack = onBack)
+    PlatformBackHandler(enabled = !checkOpen && !phoneToolsOpen && !appIconOpen && !startInstructionOpen && !callTargetOpen && !languageOpen && !connectedDevicesOpen && !sidebarPagesOpen && !creditsOpen && !assistantSetupOpen, onBack = onBack)
     // A page opened over Settings takes the keyboard from the search, so nothing typed there lands in a hidden query.
     val focus = LocalFocusManager.current
-    val pageOver = phoneToolsOpen || appIconOpen || startInstructionOpen || callTargetOpen || languageOpen || connectedDevicesOpen || sidebarPagesOpen || assistantSetupOpen
+    val pageOver = phoneToolsOpen || appIconOpen || startInstructionOpen || callTargetOpen || languageOpen || connectedDevicesOpen || sidebarPagesOpen || creditsOpen || assistantSetupOpen
     LaunchedEffect(pageOver) { if (pageOver) focus.clearFocus() }
     // The desktop lists the sections beside the page; they say here where they start.
     val anchors = remember { mutableStateMapOf<String, Int>() }
     CompositionLocalProvider(LocalSectionAnchors provides anchors.takeIf { isDesktop }) { SettingsView(
         settings, info, gateway.url, viewModel::update, onBack, onSignOut, onOpenGateways,
-        gatewayName = gateway.label,
+        gatewayName = gateway.savedLabel(),
         onCheckConnection = {
             checkOpen = true
             viewModel.runConnectionCheck()
         },
         push = push,
+        pushAvailable = viewModel.pushAvailable,
         pushTest = pushTest,
         onPushAnywhere = viewModel::setPushAnywhere,
         onPushTest = viewModel::sendPushTest,
@@ -313,6 +324,9 @@ fun SettingsScreen(
             viewModel.removeWallpaper()
         },
         onOpenPhoneTools = { phoneToolsOpen = true },
+        desktopAgentCards = {
+            if (agentScreenRendererAvailable()) DesktopAgentCardsSetting(settings, viewModel::update)
+        },
         botFaces = botFaces,
         onChooseCallTarget = { callTargetOpen = true },
         appIcon = appIcons.current,
@@ -322,6 +336,7 @@ fun SettingsScreen(
         onOpenStartInstruction = { startInstructionOpen = true },
         onOpenConnectedDevices = { connectedDevicesOpen = true },
         onOpenSidebarPages = { sidebarPagesOpen = true },
+        onOpenCredits = { creditsOpen = true },
         suggestions = suggestions,
         onInstallSuggestions = viewModel::installSuggestions,
         onCheckSuggestions = viewModel::checkSuggestions,
@@ -390,6 +405,7 @@ fun SettingsScreen(
     if (appIconOpen) AppIconScreen(onBack = { appIconOpen = false })
     if (sidebarPagesOpen) SidebarPagesScreen(settings, viewModel::update, onBack = { sidebarPagesOpen = false })
     if (languageOpen) LanguageScreen(onBack = { languageOpen = false })
+    if (creditsOpen) CreditsScreen(onBack = { creditsOpen = false })
     ConnectionCheckSheet(
         visible = checkOpen,
         results = check.results,
@@ -442,6 +458,47 @@ private fun InversePillButton(text: String, icon: ImageVector, onClick: () -> Un
     }
 }
 
+@Composable
+private fun DesktopAgentCardsSetting(settings: AppSettings, onUpdate: ((AppSettings) -> AppSettings) -> Unit) {
+    val bridge = koinInject<PhoneToolsBridge>()
+    val status by bridge.status.collectAsStateWithLifecycle()
+    val id = PhoneTool.ShowUi.id
+    val enabled = settings.phoneTools && id in settings.phoneToolsOn
+    val title = stringResource(Res.string.phone_tool_show_ui)
+    val detail = stringResource(Res.string.phone_tool_show_ui_detail)
+    var installAsked by remember { mutableStateOf(false) }
+    PluginInstallDialog(installAsked, title, detail, onDismiss = { installAsked = false }) {
+        installAsked = false
+        bridge.setUp()
+    }
+    SwitchRow(
+        title = title,
+        detail = when (status.state) {
+            State.NotInstalled -> stringResource(Res.string.phone_status_not_installed)
+            State.Outdated -> stringResource(Res.string.phone_status_too_old)
+            State.Offline -> stringResource(Res.string.phone_status_offline)
+            State.Working -> stringResource(Res.string.phone_status_working)
+            State.Failed -> status.detail ?: stringResource(Res.string.phone_status_refused)
+            else -> detail
+        },
+        checked = enabled,
+        onCheckedChange = { on ->
+            onUpdate {
+                it.copy(
+                    phoneTools = on || it.phoneTools,
+                    phoneToolsOn = if (on) (it.phoneToolsOn + id).distinct() else it.phoneToolsOn - id,
+                )
+            }
+        },
+        icon = Lucide.AppWindow,
+    )
+    if (enabled && status.state == State.NotInstalled) {
+        ActionRow(stringResource(Res.string.phone_set_up), Lucide.AppWindow) { installAsked = true }
+    }
+    if (enabled) status.update?.let { PluginUpdateRow(it, bridge::updatePlugin) }
+    Divider()
+}
+
 /** The settings page itself, stateless so previews can draw it. */
 @Composable
 internal fun SettingsView(
@@ -456,6 +513,7 @@ internal fun SettingsView(
     gatewayName: String = gatewayUrl.substringAfter("://").trimEnd('/'),
     onCheckConnection: () -> Unit = {},
     push: PushStatus = PushStatus(),
+    pushAvailable: Boolean = !isDesktop,
     pushTest: Boolean? = null,
     onPushAnywhere: (Boolean) -> Unit = {},
     onPushTest: () -> Unit = {},
@@ -467,6 +525,7 @@ internal fun SettingsView(
     onChooseWallpaper: () -> Unit = {},
     onRemoveWallpaper: () -> Unit = {},
     onOpenPhoneTools: () -> Unit = {},
+    desktopAgentCards: @Composable () -> Unit = {},
     botFaces: BotFaces = BotFaces(),
     onChooseCallTarget: () -> Unit = {},
     appIcon: AppIcon = AppIcon.Blue,
@@ -477,6 +536,7 @@ internal fun SettingsView(
     onOpenStartInstruction: () -> Unit = {},
     onOpenConnectedDevices: () -> Unit = {},
     onOpenSidebarPages: () -> Unit = {},
+    onOpenCredits: () -> Unit = {},
     /** Where the Next Prompt plugin behind Suggested replies stands on the gateway. */
     suggestions: SuggestionsPlugin = SuggestionsPlugin.Checking,
     onInstallSuggestions: () -> Unit = {},
@@ -651,6 +711,15 @@ internal fun SettingsView(
                     )
                 }
 
+                Section(stringResource(Res.string.settings_section_accessibility)) {
+                    SwitchRow(
+                        title = stringResource(Res.string.settings_opaque_composer),
+                        detail = stringResource(Res.string.settings_opaque_composer_detail),
+                        checked = settings.opaqueComposer,
+                        onCheckedChange = { on -> onUpdate { it.copy(opaqueComposer = on) } },
+                    )
+                }
+
                 Section(stringResource(Res.string.settings_section_chat)) {
                     Field(
                         stringResource(Res.string.settings_running_send),
@@ -742,6 +811,16 @@ internal fun SettingsView(
                         onCheckedChange = { on -> onUpdate { it.copy(showLinkPreviews = on) } },
                         icon = Lucide.Globe,
                     )
+                    if (!isDesktop) {
+                        Divider()
+                        SwitchRow(
+                            title = stringResource(Res.string.settings_open_web_links_in_browser),
+                            detail = stringResource(Res.string.settings_open_web_links_in_browser_detail),
+                            checked = settings.openWebLinksInBrowser,
+                            onCheckedChange = { on -> onUpdate { it.copy(openWebLinksInBrowser = on) } },
+                            icon = Lucide.ExternalLink,
+                        )
+                    }
                     Divider()
                     SwitchRow(
                         title = stringResource(Res.string.settings_suggested_replies),
@@ -830,6 +909,7 @@ internal fun SettingsView(
                 }
 
                 if (isDesktop) Section(stringResource(Res.string.settings_section_desktop)) {
+                    desktopAgentCards()
                     SwitchRow(
                         title = stringResource(Res.string.settings_keep_running),
                         detail = stringResource(Res.string.settings_keep_running_detail),
@@ -877,7 +957,7 @@ internal fun SettingsView(
                     PluginInstallDialog(
                         visible = installAsked,
                         feature = stringResource(Res.string.settings_notifications_anywhere),
-                        what = stringResource(Res.string.plugin_notifications_what),
+                        what = stringResource(if (isDesktop) Res.string.plugin_notifications_what_desktop else Res.string.plugin_notifications_what),
                         onDismiss = { installAsked = false },
                     ) {
                         installAsked = false
@@ -939,9 +1019,8 @@ internal fun SettingsView(
                             icon = Lucide.Vibrate,
                         )
                     }
-                    // The phone's push through ntfy; the desktop has no way to receive it yet.
-                    if (!isDesktop) Divider()
-                    if (!isDesktop) SwitchRow(
+                    if (pushAvailable) Divider()
+                    if (pushAvailable) SwitchRow(
                         title = stringResource(Res.string.settings_notifications_anywhere),
                         detail = pushDetail(settings.pushAnywhere, push),
                         checked = settings.pushAnywhere,
@@ -950,11 +1029,11 @@ internal fun SettingsView(
                         icon = Lucide.Globe,
                     )
                     val pushUpdate = push.update
-                    if (settings.pushAnywhere && pushUpdate != null) {
+                    if (pushAvailable && settings.pushAnywhere && pushUpdate != null) {
                         Divider()
                         PluginUpdateRow(pushUpdate, onPushUpdate)
                     }
-                    if (settings.pushAnywhere && push.state == PushStatus.State.On) {
+                    if (pushAvailable && settings.pushAnywhere && push.state == PushStatus.State.On) {
                         Divider()
                         ActionRow(
                             when (pushTest) {
@@ -1024,6 +1103,7 @@ internal fun SettingsView(
                         stringResource(Res.string.settings_gateway),
                         info.version?.let { stringResource(Res.string.settings_hermes_version, it) }
                             ?: stringResource(Res.string.common_checking),
+                        alert = if (HermesVersion.isUnsupported(info.version)) stringResource(Res.string.hermes_unsupported_version) else null,
                     )
                     Divider()
                     val uriHandler = LocalUriHandler.current
@@ -1034,6 +1114,8 @@ internal fun SettingsView(
                         onClick = { uriHandler.openUri(DISCORD_INVITE) },
                     )
                 }
+
+                SupportSection(onOpenCredits)
             } }
         }
         // On the desktop, the sections listed to the left of the page, where the window has room for them. After the
@@ -1139,7 +1221,7 @@ private fun suggestionsDetail(on: Boolean, plugin: SuggestionsPlugin): String =
 /** What Notifications anywhere does, or where its setup on the gateway stands. */
 @Composable
 private fun pushDetail(on: Boolean, push: PushStatus): String {
-    if (!on) return stringResource(Res.string.settings_notifications_anywhere_detail)
+    if (!on) return stringResource(if (isDesktop) Res.string.settings_notifications_anywhere_desktop_detail else Res.string.settings_notifications_anywhere_detail)
     return when (push.state) {
         PushStatus.State.On -> push.detail ?: stringResource(Res.string.settings_push_on)
         PushStatus.State.Working -> push.detail ?: stringResource(Res.string.settings_push_working)
@@ -1672,13 +1754,15 @@ private fun accentName(palette: AccentPalette): String {
 }
 
 
+/** A setting that only shows a [value]; [alert], when set, says under it what needs doing. */
 @Composable
-internal fun InfoRow(title: String, value: String) {
+internal fun InfoRow(title: String, value: String, alert: String? = null) {
     if (!settingShown(title, value)) return
     Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(title, style = Theme[typography][body], color = Theme[colors][text])
         // A desktop's mouse can select and copy it (a version, an address), as a desktop's About panel allows.
         CopyableOnDesktop { Text(value, style = Theme[typography][bodySmall], color = Theme[colors][textTertiary], maxLines = 2, overflow = TextOverflow.Ellipsis) }
+        if (alert != null) CopyableOnDesktop { Text(alert, style = Theme[typography][bodySmall], color = Theme[colors][warning]) }
     }
 }
 

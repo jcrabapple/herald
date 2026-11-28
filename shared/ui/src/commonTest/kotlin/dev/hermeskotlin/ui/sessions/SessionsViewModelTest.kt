@@ -93,6 +93,8 @@ class SessionsViewModelTest {
         seen: SeenStore = SeenStore(InMemoryKeyValueStore()) { 0.0 },
         /** The list's rows, as JSON. */
         rows: String = """{"id":"a","title":"Alpha","pinned":true},{"id":"b","title":"Beta"}""",
+        /** The list's rows at each read, for a list that changes; [rows] by default. */
+        rowsNow: () -> String = { rows },
     ): SessionsViewModel {
         // On the test dispatcher, so no request is still finishing on another thread when a test ends
         // (and resuming onto Dispatchers.Main while the next test sets it).
@@ -101,7 +103,7 @@ class SessionsViewModelTest {
         config.addHandler { request ->
             when {
                 request.url.encodedPath == "/api/sessions" -> respond(
-                    """{"sessions":[$rows],"total":$total}""",
+                    """{"sessions":[${rowsNow()}],"total":$total}""",
                     if (listFails()) HttpStatusCode.InternalServerError else listStatus, json,
                 )
                 request.url.encodedPath == "/api/auth/ws-ticket" -> respond("""{"ticket":"T","ttl_seconds":30}""", HttpStatusCode.OK, json)
@@ -231,10 +233,12 @@ class SessionsViewModelTest {
     }
 
     /** A gateway socket that says it's ready and lists [live] as live sessions (`stored id to status`). */
-    private class LiveGateway(private val live: Map<String, String>, projects: Map<String, String> = emptyMap()) : RpcTransport {
+    private class LiveGateway(live: Map<String, String>, projects: Map<String, String> = emptyMap()) : RpcTransport {
+        /** The live sessions it lists, as `stored id to status`; a test changes them as a turn ends. */
+        val live = live.toMutableMap()
+
         /**
-         * What each `projects.*` method answers; a value starting `error:` turns the call down with that message,
-         * and `missing` answers as a gateway without the method.
+         * What each `projects.*` method answers; a value starting `error:` turns the call down with that message.
          */
         val projects = projects.toMutableMap()
 
@@ -257,10 +261,6 @@ class SessionsViewModelTest {
             method?.let { methods += it }
             projects[method]?.takeIf { it.startsWith("error:") }?.let { reason ->
                 inbound.send("""{"jsonrpc":"2.0","id":$id,"error":{"code":5063,"message":"${reason.removePrefix("error:")}"}}""")
-                return
-            }
-            if (projects[method] == "missing") {
-                inbound.send("""{"jsonrpc":"2.0","id":$id,"error":{"code":-32601,"message":"Method not found"}}""")
                 return
             }
             val result = if (method == "session.active_list") {
@@ -341,6 +341,71 @@ class SessionsViewModelTest {
         val statuses = vm.statuses.first { it.isNotEmpty() }
         assertEquals(mapOf("b" to RowStatus(running = true)), statuses)
         collector.cancel()
+    }
+
+    /**
+     * Chat "a" was read to its end at 1300, then a prompt runs in it. Each of [rows] is the list's row for it as
+     * the turn goes on: the user's prompt, the first tool call, its result. Running and nothing else all through
+     * the turn; once it ends, the reply the user hasn't seen is a New reply. The row stays `is_active` throughout,
+     * as a loaded session does (#485).
+     */
+    private fun aTurnRuns(rows: List<String>, look: suspend (SeenStore) -> Unit) = runTest(dispatcher) {
+        val seen = SeenStore(InMemoryKeyValueStore()) { 1000.0 }
+        val socket = LiveGateway(mapOf("a" to "working"))
+        var row = rows.first()
+        val vm = viewModel(socket = socket, seen = seen, total = 1, rowsNow = { row })
+        vm.bind(gateway)
+        vm.awaitLoaded()
+        look(seen)
+        vm.setVisible(true)
+        backgroundScope.launch { vm.statuses.collect {} }
+        for (next in rows) {
+            row = next
+            vm.refresh()
+            val lastActive = Regex(""""last_active":([0-9.]+)""").find(next)!!.groupValues[1].toDouble()
+            vm.state.first { it.sessions.singleOrNull()?.lastActive == lastActive }
+            val status = vm.statuses.first { it["a"]?.running == true }.getValue("a")
+            assertTrue(AttentionFilter.Running.keeps(status), next)
+            assertFalse(AttentionFilter.NeedsAttention.keeps(status), "$next: $status")
+            assertEquals(listOf(Res.string.sessions_status_running), rowStatusWords(status, draft = false), next)
+        }
+
+        // The turn ends: the list's row is still loaded, and the reply waits to be read.
+        socket.live["a"] = "idle"
+        advanceTimeBy(11_000)
+        // A chat with nothing to say drops out of the map, so wait for "not running" and fail if it went.
+        val status = assertNotNull(vm.statuses.first { it["a"]?.running != true }["a"], "no longer a New reply")
+        assertTrue(AttentionFilter.NeedsAttention.keeps(status), "$status")
+        assertEquals(listOf(Res.string.sessions_status_new_reply), rowStatusWords(status, draft = false))
+    }
+
+    @Test
+    fun aRunningTurnIsNotANewReplyOnAGatewayThatTracksReads() {
+        // As a v0.23.3 Webapp listener (session authority) reports it: any activity after `last_read_at` is unread.
+        fun row(lastActive: Double, unread: Boolean) =
+            """{"id":"a","title":"Alpha","source":"local","last_active":$lastActive,"is_active":true,"unread":$unread,"last_read_at":1300.5}"""
+        aTurnRuns(listOf(row(1300.0, unread = false), row(1305.0, unread = true), row(1306.0, unread = true), row(1314.0, unread = true))) { seen ->
+            seen.markLooked(gateway.gatewayUrl, "a", 1300.0)
+        }
+    }
+
+    @Test
+    fun aRunningTurnIsNotANewReplyWithoutAReadWatermark() {
+        // No `unread` or `last_read_at`: the phone's own look decides, for a chat from a local source.
+        fun row(lastActive: Double) = """{"id":"a","title":"Alpha","source":"local","last_active":$lastActive,"is_active":true}"""
+        aTurnRuns(listOf(row(1300.0), row(1305.0), row(1306.0), row(1314.0))) { seen ->
+            seen.markLooked(gateway.gatewayUrl, "a", 1300.0)
+        }
+    }
+
+    @Test
+    fun aRunningTurnLeftForAnotherChatIsNotANewReplyUntilItEnds() {
+        // A chat the Webapp made (`gui`), left while its first turn ran.
+        fun row(lastActive: Double) =
+            """{"id":"a","title":"Alpha","source":"gui","last_active":$lastActive,"is_active":true,"unread":false,"last_read_at":null}"""
+        aTurnRuns(listOf(row(1300.0), row(1305.0), row(1306.0))) { seen ->
+            seen.markLooked(gateway.gatewayUrl, "a", 1300.0, running = true)
+        }
     }
 
     @Test
@@ -535,29 +600,6 @@ class SessionsViewModelTest {
         val after = vm.state.first { it.message != null }
         assertEquals("herald", after.projects.single().label)
         assertEquals(Said.Verbatim("name taken"), after.message)
-    }
-
-    @Test
-    fun aGatewayWithoutProjectChangesStopsOfferingThem() = runTest(dispatcher) {
-        val socket = LiveGateway(
-            live = emptyMap(),
-            projects = mapOf(
-                "projects.tree" to """{"projects":[{"id":"/srv/site","label":"site","path":"/srv/site","isAuto":true,"sessionIds":["z"]}]}""",
-                "projects.create" to "missing",
-            ),
-        )
-        val vm = viewModel(socket = socket)
-        vm.bind(gateway)
-        vm.awaitLoaded()
-        vm.state.first { it.canMakeProjects }
-        var done: Said? = null
-        vm.createProject("site", "/srv/site") { done = it }
-        assertFalse(vm.state.first { !it.canMakeProjects }.canMakeProjects)
-        assertEquals(said(Res.string.sessions_gateway_cant_change_projects), done)
-        // A later tree doesn't bring the button back.
-        vm.refresh()
-        vm.awaitLoaded()
-        assertFalse(vm.state.value.canMakeProjects)
     }
 
     @Test

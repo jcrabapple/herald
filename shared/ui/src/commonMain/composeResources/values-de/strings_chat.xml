@@ -192,6 +192,10 @@
         <item quantity="other">%1$d laufen</item>
     </plurals>
     <string name="chat_processes_empty">Nichts läuft. Dev-Server, Builds und Watcher, die der Agent im Hintergrund startet, erscheinen hier.</string>
+    <string name="chat_processes_subagents">Subagenten</string>
+    <string name="chat_processes_subagents_unavailable">Der Status der Subagenten ist nicht verfügbar.</string>
+    <string name="chat_processes_shell">Shell-Prozesse</string>
+    <string name="chat_processes_shell_empty">Keine Shell-Prozesse im Hintergrund.</string>
     <string name="chat_processes_finished">Beendet</string>
     <string name="chat_process_hide_output">Ausgabe ausblenden</string>
     <string name="chat_process_show_output">Ausgabe zeigen</string>
@@ -238,6 +242,9 @@
 
     <string name="chat_event_compaction">Frühere Nachrichten zusammengefasst</string>
     <string name="chat_event_routine">Routine „%1$s“ lief</string>
+    <string name="chat_event_routine_unnamed">Eine Routine lief</string>
+    <string name="chat_event_routine_problem">Routine „%1$s“ meldete ein Problem</string>
+    <string name="chat_event_routine_problem_unnamed">Eine Routine meldete ein Problem</string>
     <string name="chat_event_failed_turn">Dieser Zug wurde nicht abgeschlossen.</string>
     <string name="chat_event_system_messages">Systemnachrichten · %1$d</string>
     <string name="chat_event_other_bot">der andere Bot</string>
@@ -286,6 +293,10 @@
     <string name="chat_usage_account">Konto</string>
 
     <string name="chat_requests_more">+%1$d weitere</string>
+    <string name="chat_request_minimize">Minimieren</string>
+    <string name="chat_request_restore">Aufklappen</string>
+    <string name="chat_request_pill_approval">Erlaubnis nötig</string>
+    <string name="chat_request_pill_question">Frage wartet</string>
     <string name="chat_stop_task_button">Aufgabe stoppen</string>
     <string name="chat_approval_title">Diesen Befehl erlauben?</string>
     <string name="chat_approval_tool">Hermes möchte das mit %1$s ausführen.</string>
@@ -463,6 +474,7 @@
     <string name="chat_notice_adopted">%1$s adoptiert</string>
     <string name="chat_notice_prompt_not_sent">Der Prompt wurde nicht gesendet: Kyllene hat das Gateway nicht erreicht. Er steht im Eingabefeld.</string>
     <string name="chat_notice_call_not_started">Der Anruf hat nicht begonnen: Kyllene hat das Gateway nicht erreicht.</string>
+    <string name="chat_notice_queued_edit_overtaken">Ihr Durchlauf hat vor deiner Änderung begonnen, daher ging die Nachricht unverändert raus. Deine Änderung steht im Eingabefeld.</string>
     <string name="chat_notice_too_many_files">Bis zu %1$d Anhänge pro Nachricht.</string>
     <string name="chat_notice_file_too_large">%1$s ist größer als %2$d MB.</string>
     <string name="chat_uploading">%1$s wird hochgeladen · %2$d %</string>
@@ -472,6 +484,7 @@
     <string name="chat_drop_limits">Bis zu %1$d Dateien, je %2$d MB.</string>
     <string name="chat_send_again">Erneut senden</string>
     <string name="chat_editing_banner">Du bearbeitest eine Nachricht. Senden ersetzt sie und alles danach.</string>
+    <string name="chat_editing_queued_banner">Du bearbeitest eine eingereihte Nachricht. Senden ändert sie, und sie rückt ans Ende der Warteschlange.</string>
 
     <string name="chat_copy">Kopieren</string>
     <string name="chat_edit">Bearbeiten</string>
@@ -481,6 +494,13 @@
     <string name="chat_regenerate">Neu erzeugen</string>
     <string name="chat_read_aloud">Vorlesen</string>
     <string name="chat_stop_reading">Vorlesen stoppen</string>
+    <string name="chat_pause_reading">Vorlesen pausieren</string>
+    <string name="chat_resume_reading">Vorlesen fortsetzen</string>
+    <string name="chat_react_acknowledge">Verstanden</string>
+    <string name="chat_react_continue">Fortfahren</string>
+    <string name="chat_react_verify">Überprüfen</string>
+    <string name="chat_react_explain">Erklären</string>
+    <string name="chat_reply_more">Mehr</string>
     <string name="chat_message_actions">Aktionen für die Nachricht</string>
     <string name="chat_queued">Eingereiht · wird nach dieser Aufgabe gesendet</string>
     <string name="chat_editing_in_composer">Wird im Eingabefeld bearbeitet</string>

@@ -1,5 +1,6 @@
 package dev.hermeskotlin.ui.chat
 
+import dev.hermeskotlin.core.chat.ReplyReaction
 import androidx.compose.foundation.text.input.TextFieldState
 import dev.hermeskotlin.core.chat.ChatMessage
 import dev.hermeskotlin.core.chat.ChatState
@@ -37,6 +38,8 @@ interface ChatActions {
      * entry). Mid-turn it steers, or queues when Send would stop the reply.
      */
     fun sendPrompt(text: String) {}
+
+    fun reactToReply(key: String, reaction: ReplyReaction) {}
 
     fun interrupt()
 
@@ -89,6 +92,12 @@ interface ChatActions {
      */
     fun startEdit(key: String)
 
+    /**
+     * Puts prompt [key], still queued behind the running turn, in the composer to change it; the next send changes it
+     * where it waits, cutting nothing. Only where the gateway [offers that][dev.hermeskotlin.core.chat.canEditQueued].
+     */
+    fun startQueuedEdit(key: String) {}
+
     fun cancelEdit()
 
     /** Looks in the transcript again for a prompt whose delivery is unknown. */
@@ -136,6 +145,10 @@ interface ChatActions {
     fun readAloud(key: String, text: String) {}
 
     fun stopReading() {}
+
+    fun pauseReading() {}
+
+    fun resumeReading() {}
 
     fun dismissReadAloudError() {}
 }

@@ -26,6 +26,7 @@ import dev.hermeskotlin.core.voice.SpeechPlayer
 import dev.hermeskotlin.core.voice.VoiceRecorder
 import dev.hermeskotlin.ui.bots.BotFaces
 import dev.hermeskotlin.ui.chat.ReplySpeaker
+import dev.hermeskotlin.ui.chat.withoutEmptyListItem
 import dev.hermeskotlin.ui.chat.replySpeaker
 import dev.hermeskotlin.ui.voice.VoiceController
 import kotlinx.coroutines.CancellationException
@@ -231,7 +232,7 @@ class AssistantPanelModel(
 
     /**
      * Which bot answers on [saved] as [profile] (null: the gateway's launch profile), once the socket is up. Left
-     * to "Hermes" when it can't be had (offline, an older gateway), or drawn as its shape when its picture can't;
+     * to "Hermes" when it can't be had (offline, or the roster failed), or drawn as its shape when its picture can't;
      * the next call-up asks again.
      */
     private fun readSpeaker(saved: SavedGateway, profile: String?) {
@@ -338,7 +339,7 @@ class AssistantPanelModel(
      * question) the whole screen if they added it.
      */
     fun send() {
-        val text = composer.text.toString().trim()
+        val text = withoutEmptyListItem(composer.text).trim()
         val session = _session.value ?: return
         val first = !session.state.value.hasConversation
         val circled = _circledPart.value

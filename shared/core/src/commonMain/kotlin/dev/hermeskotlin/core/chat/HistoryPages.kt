@@ -17,7 +17,8 @@ internal const val HISTORY_PAGE_MAX = 500
  * left out, it comes whole with that page. A page without a prompt (one very long turn) is kept as it is.
  */
 internal fun List<SessionMessage>.fromFirstTurn(): List<SessionMessage> {
-    val first = indexOfFirst { it.role == "user" && !it.isHidden }
+    // A user row the chat leaves out (a compaction reminder mid-turn, say) isn't a prompt.
+    val first = indexOfFirst { it.role == "user" && !it.isHidden && !TranscriptRows.leavesOut(it) }
     return if (first > 0) drop(first) else this
 }
 
@@ -34,8 +35,17 @@ internal fun List<SessionMessage>.withNewest(page: List<SessionMessage>): List<S
 }
 
 /**
+ * The loaded rows with a full newest [page] joined on. The page as read goes first: the turn it cuts in two may
+ * start in the loaded rows, even when the page's first prompt is newer than all of them (a long turn since).
+ * Rows that were themselves trimmed to a prompt may lack the page's first rows, so it's joined from its first
+ * prompt then. Null when neither meets the loaded rows.
+ */
+internal fun List<SessionMessage>.withNewestFull(page: List<SessionMessage>): List<SessionMessage>? =
+    if (isEmpty()) page.fromFirstTurn() else withNewest(page) ?: withNewest(page.fromFirstTurn())
+
+/**
  * The loaded rows after [page], the newest page as read now (fetched [HISTORY_PAGE] at a time): the whole transcript
  * when it fit, else joined to what's loaded. Null when it can't be joined.
  */
 internal fun List<SessionMessage>.afterNewestPage(page: List<SessionMessage>, limit: Int = HISTORY_PAGE): List<SessionMessage>? =
-    if (page.size < limit) page else withNewest(page.fromFirstTurn())
+    if (page.size < limit) page else withNewestFull(page)

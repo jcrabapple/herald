@@ -192,6 +192,10 @@
         <item quantity="other">%1$d en curso</item>
     </plurals>
     <string name="chat_processes_empty">Nada en curso. Los servidores de desarrollo, compilaciones y vigilantes que el agente inicia en segundo plano aparecen aquí.</string>
+    <string name="chat_processes_subagents">Subagentes</string>
+    <string name="chat_processes_subagents_unavailable">El estado de los subagentes no está disponible.</string>
+    <string name="chat_processes_shell">Procesos de terminal</string>
+    <string name="chat_processes_shell_empty">No hay procesos de terminal en segundo plano.</string>
     <string name="chat_processes_finished">Terminados</string>
     <string name="chat_process_hide_output">Ocultar salida</string>
     <string name="chat_process_show_output">Mostrar salida</string>
@@ -238,6 +242,9 @@
 
     <string name="chat_event_compaction">Mensajes anteriores resumidos</string>
     <string name="chat_event_routine">Se ejecutó la rutina «%1$s»</string>
+    <string name="chat_event_routine_unnamed">Se ejecutó una rutina</string>
+    <string name="chat_event_routine_problem">La rutina «%1$s» informó de un problema</string>
+    <string name="chat_event_routine_problem_unnamed">Una rutina informó de un problema</string>
     <string name="chat_event_failed_turn">Este turno no terminó.</string>
     <string name="chat_event_system_messages">Mensajes del sistema · %1$d</string>
     <string name="chat_event_other_bot">el otro bot</string>
@@ -286,6 +293,10 @@
     <string name="chat_usage_account">Cuenta</string>
 
     <string name="chat_requests_more">+%1$d más</string>
+    <string name="chat_request_minimize">Minimizar</string>
+    <string name="chat_request_restore">Expandir</string>
+    <string name="chat_request_pill_approval">Se necesita permiso</string>
+    <string name="chat_request_pill_question">Pregunta pendiente</string>
     <string name="chat_stop_task_button">Detener tarea</string>
     <string name="chat_approval_title">¿Permitir este comando?</string>
     <string name="chat_approval_tool">Hermes quiere ejecutarlo con %1$s.</string>
@@ -463,6 +474,7 @@
     <string name="chat_notice_adopted">Adoptaste a %1$s</string>
     <string name="chat_notice_prompt_not_sent">El prompt no se envió: Kyllene no pudo contactar con el Gateway. Está en el cuadro de texto.</string>
     <string name="chat_notice_call_not_started">La llamada no empezó: Kyllene no pudo contactar con el Gateway.</string>
+    <string name="chat_notice_queued_edit_overtaken">Su turno empezó antes de tu edición, así que el mensaje se envió tal cual. Tu edición está en el cuadro de texto.</string>
     <string name="chat_notice_too_many_files">Hasta %1$d adjuntos por mensaje.</string>
     <string name="chat_notice_file_too_large">%1$s ocupa más de %2$d MB.</string>
     <string name="chat_uploading">Subiendo %1$s · %2$d %</string>
@@ -472,6 +484,7 @@
     <string name="chat_drop_limits">Hasta %1$d archivos, %2$d MB cada uno.</string>
     <string name="chat_send_again">Enviar de nuevo</string>
     <string name="chat_editing_banner">Editando un mensaje. Al enviarlo se reemplaza junto con todo lo posterior.</string>
+    <string name="chat_editing_queued_banner">Editando un mensaje en cola. Al enviarlo se cambia y pasa al final de la cola.</string>
 
     <string name="chat_copy">Copiar</string>
     <string name="chat_edit">Editar</string>
@@ -481,6 +494,13 @@
     <string name="chat_regenerate">Regenerar</string>
     <string name="chat_read_aloud">Leer en voz alta</string>
     <string name="chat_stop_reading">Dejar de leer</string>
+    <string name="chat_pause_reading">Pausar lectura</string>
+    <string name="chat_resume_reading">Reanudar lectura</string>
+    <string name="chat_react_acknowledge">Entendido</string>
+    <string name="chat_react_continue">Continuar</string>
+    <string name="chat_react_verify">Verificar</string>
+    <string name="chat_react_explain">Explicar</string>
+    <string name="chat_reply_more">Más</string>
     <string name="chat_message_actions">Acciones del mensaje</string>
     <string name="chat_queued">En cola · se envía después de esta tarea</string>
     <string name="chat_editing_in_composer">Editando en el cuadro de texto</string>

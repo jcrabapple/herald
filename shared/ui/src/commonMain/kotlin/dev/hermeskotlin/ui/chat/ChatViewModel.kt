@@ -1,5 +1,6 @@
 package dev.hermeskotlin.ui.chat
 
+import dev.hermeskotlin.core.chat.ReplyReaction
 import dev.hermeskotlin.core.voice.ReadAloudVoices
 import dev.hermeskotlin.core.voice.InMemoryReadAloudVoices
 import androidx.compose.foundation.text.input.TextFieldState
@@ -39,7 +40,9 @@ import dev.hermeskotlin.core.models.ModelsApi
 import dev.hermeskotlin.core.chat.ModelSwitch
 import dev.hermeskotlin.core.chat.OutgoingAttachment
 import dev.hermeskotlin.core.chat.SendOutcome
+import dev.hermeskotlin.core.chat.QueuedEditOutcome
 import dev.hermeskotlin.core.chat.canEdit
+import dev.hermeskotlin.core.chat.canEditQueued
 import dev.hermeskotlin.core.chat.promptNow
 import dev.hermeskotlin.core.chat.regenerateTarget
 import dev.hermeskotlin.core.network.errorMessage
@@ -58,6 +61,7 @@ import dev.hermeskotlin.ui.pet.PetController
 import dev.hermeskotlin.ui.journey.JourneyController
 import dev.hermeskotlin.core.voice.AudioApi
 import dev.hermeskotlin.core.voice.LiveCalls
+import dev.hermeskotlin.core.voice.ReadAloudKeepAlive
 import dev.hermeskotlin.core.voice.VoiceKeepAlive
 import dev.hermeskotlin.core.voice.SpeechPlayer
 import dev.hermeskotlin.core.voice.SpeechStreams
@@ -76,6 +80,9 @@ import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.debounce
@@ -182,6 +189,27 @@ internal data class ChatTranscript(val state: ChatState = ChatState(), val widge
 internal data class ChatReadPosition(val target: ChatTarget, val readUpTo: Double?)
 
 /**
+ * Where the reader was in the open chat's list when it last left the screen: the screen rebuilt (on waking the phone
+ * or turning it), or the list was swapped for a spinner for a moment. The list comes back there, not to its end or
+ * the "New messages" line as on opening the chat.
+ */
+internal data class TranscriptViewport(
+    val conversationKey: Any?,
+    /** The message at the top of the list, by key, and how far it's scrolled past. */
+    val firstKey: String?,
+    val firstOffset: Int,
+    val pinned: Boolean,
+    /** The read position and saved copy the opening below was worked out for; it holds for those only. */
+    val readUpTo: Double?,
+    val savedCopy: Boolean,
+    val readerNavigated: Boolean,
+    val unreadSettled: Boolean,
+    val positioned: Boolean,
+    val unreadFrom: String?,
+    val unreadPagesLoaded: Int,
+)
+
+/**
  * Shows the [ChatSession] the app-wide [ChatHost] has open; opening another target replaces it.
  * Remembers the open chat in [LastChatStore] so the next launch returns to it: a stored session once
  * it has messages, or nothing while a new chat is still empty. Each chat keeps its own unsent text in
@@ -221,6 +249,8 @@ class ChatViewModel(
     deviceLock: DeviceLock = DeviceLock.None,
     /** The Next Prompt plugin's suggestions; none without it. */
     nextPromptApi: NextPromptApi? = null,
+    /** Keeps Read aloud going with the screen off; without it, leaving the app stops the reading. */
+    readAloudKeepAlive: ReadAloudKeepAlive? = null,
 ) : ViewModel(), ChatActions {
 
     /** Dictation, voice chat and Read aloud for the open chat. */
@@ -230,6 +260,7 @@ class ChatViewModel(
         deviceLock = deviceLock,
         liveCalls = liveCalls,
         readAloudVoices = readAloudVoices ?: InMemoryReadAloudVoices(),
+        readAloudKeepAlive = readAloudKeepAlive,
     )
 
     /** The profile's pet and its gallery. */
@@ -263,6 +294,21 @@ class ChatViewModel(
     private var target: ChatTarget? = null
     private val _readPosition = MutableStateFlow<ChatReadPosition?>(null)
     internal val readPosition: StateFlow<ChatReadPosition?> = _readPosition.asStateFlow()
+    /** Where the reader was in the open chat's list when it last left the screen; outlives the screen being rebuilt. */
+    private var viewport: TranscriptViewport? = null
+
+    /**
+     * Where the reader was in [target]'s list, by its list's [key]. Not for the same chat reopened at a new read position
+     * (from a notification), which opens at its "New messages" line: the screen asks before [open] has run.
+     */
+    internal fun viewportFor(key: Any?, target: ChatTarget): TranscriptViewport? =
+        viewport?.takeIf { it.conversationKey == key && !reopensAtNewPosition(target) }
+
+    private fun reopensAtNewPosition(target: ChatTarget) = target.readUpTo != null && target.readUpTo != this.target?.readUpTo
+
+    internal fun saveViewport(value: TranscriptViewport) {
+        viewport = value
+    }
 
     private var readPositionJob: Job? = null
     private var readTail: Triple<String, String, Double>? = null
@@ -293,7 +339,7 @@ class ChatViewModel(
             } else null
             val shared = answer?.value?.lastReadAt?.takeIf { it.isFinite() && it >= 0 }
             if (target != owner) return@launch
-            // Only a clear answer without one (an older gateway, an untracked chat) is left alone; an unknown one is sent.
+            // Only a clear answer without one (an untracked chat) is left alone; an unknown one is sent.
             readTracked = answer == null || shared != null
             readResolved = true
             _readPosition.value = ChatReadPosition(owner, shared?.takeIf { it > 0 } ?: fallback)
@@ -354,6 +400,9 @@ class ChatViewModel(
     private val session = MutableStateFlow<ChatSession?>(null)
     private val widgetSession = MutableStateFlow<Pair<ChatSession, ChatTarget>?>(null)
 
+    /** An external return uses the target actually bound to this source, including its draft and bot identity. */
+    fun targetFor(source: ChatSession): ChatTarget? = target.takeIf { session.value === source }
+
     init {
         // Caught up only while the end that was read is still the end: a turn starting or a message coming in lets go.
         viewModelScope.launch {
@@ -399,6 +448,8 @@ class ChatViewModel(
     /** Files waiting in the composer for the next send. */
     val attachments: StateFlow<List<OutgoingAttachment>> = _attachments.asStateFlow()
 
+    private var imagePasteScope: CoroutineScope? = null
+
     /** Files picked in chats that aren't open, by [trayKey]; they live as long as the app does. */
     private val trays = mutableMapOf<String, List<OutgoingAttachment>>()
 
@@ -421,6 +472,14 @@ class ChatViewModel(
 
     /** The prompt being edited in the composer; the next send replaces it and everything after it. */
     val editing: StateFlow<String?> = _editing.asStateFlow()
+
+    private val _editingQueued = MutableStateFlow(false)
+
+    /**
+     * The prompt [editing] is one still queued behind the running turn: the next send changes its text where it
+     * waits (`prompt.replace_queued`), and cuts nothing, so it can go while the turn runs.
+     */
+    val editingQueued: StateFlow<Boolean> = _editingQueued.asStateFlow()
 
     /** What the composer held when the edit started, given back when it ends. */
     private var typedBeforeEdit = ""
@@ -478,11 +537,38 @@ class ChatViewModel(
                 }
         }
         viewModelScope.launch {
-            combine(state, _editing) { chat, key -> key?.takeIf { chat.historyLoaded }?.let { it to chat.promptNow(it, editingRowId) } }
+            // A queued edit's prompt has no row yet: it's watched below, by whether it still waits.
+            combine(state, _editing) { chat, key ->
+                key?.takeIf { chat.historyLoaded && !_editingQueued.value }?.let { it to chat.promptNow(it, editingRowId) }
+            }
                 .filterNotNull()
                 .collect { (key, now) ->
                     // A reload gives a prompt sent from here its stored key; it's still the same row.
                     if (now == null) editGone() else if (now != key) _editing.value = now
+                }
+        }
+        viewModelScope.launch {
+            // Its turn took the queued prompt before the edit went: it went as it was. What was typed for it stays in
+            // the composer, to send as a message of its own or drop, and the screen says so. One a stop dropped never
+            // ran: the edit just ends, and the stop gives its text back.
+            combine(state, _editing, _editingQueued) { chat, key, queued ->
+                key?.takeIf { queued }?.let { k ->
+                    val prompt = chat.messages.firstOrNull { it.key == k } as? ChatMessage.User
+                    when {
+                        prompt == null -> QueuedEditWatch.Gone
+                        !prompt.queued -> QueuedEditWatch.Started
+                        else -> QueuedEditWatch.Waiting
+                    }
+                }
+            }
+                .filterNotNull()
+                .distinctUntilChanged()
+                .collect { watch ->
+                    when (watch) {
+                        QueuedEditWatch.Started -> queuedEditOvertaken()
+                        QueuedEditWatch.Gone -> editGone()
+                        QueuedEditWatch.Waiting -> Unit
+                    }
                 }
         }
         viewModelScope.launch {
@@ -592,6 +678,7 @@ class ChatViewModel(
 
     /** Opens [target]'s chat in the host, with the transcript's file callbacks bound to that target. */
     private fun bind(target: ChatTarget) {
+        discardImagePastes()
         val chat = host.open(target.gateway.gatewayUrl, target.storedSessionId, target.title, target.profile, target.cwd)
         session.value = chat
         widgetSession.value = chat?.let { it to target }
@@ -602,6 +689,7 @@ class ChatViewModel(
         // "New messages" line from the target; the chat itself, its draft and any voice chat stay as they are.
         if (this.target?.copy(readUpTo = null) == target.copy(readUpTo = null)) {
             val changed = this.target != target || session.value !== host.session.value
+            if (reopensAtNewPosition(target)) viewport = null
             this.target = target
             if (changed) resolveReadPosition(target)
             // An expired session or sign-out closes the host's chat; the same chat reopened after signing
@@ -621,6 +709,7 @@ class ChatViewModel(
         val typed = composer.text.toString().takeIf { sameChat }
         stashDraft()
         this.target = target
+        viewport = null
         resolveReadPosition(target)
         // A voice chat belongs to the chat it started in.
         voice.stopAll()
@@ -747,9 +836,9 @@ class ChatViewModel(
         viewModelScope.launch { _requests.send(ChatRequest.OpenProcesses) }
     }
 
-    fun watchProcesses() = processes.start(session.value)
+    fun watchProcesses() = processes.start(session)
 
-    fun killProcess(process: BackgroundProcess) = processes.kill(session.value, process)
+    fun killProcess(process: BackgroundProcess) = processes.kill(session, process)
 
     /** Shows the checkpoints sheet (from the chat menu, or `/rollback`). */
     fun openCheckpoints() {
@@ -910,6 +999,39 @@ class ChatViewModel(
         _attachments.update { it + fitting.take(room.coerceAtLeast(0)) }
     }
 
+    /** An accepted paste belongs to the draft even while a sheet covers its composer. */
+    internal fun pasteImages(owner: ChatTarget, read: suspend () -> Pair<List<OutgoingAttachment>, String?>) {
+        if (target?.sameChatAs(owner) != true || _editing.value != null) return
+        val chat = session.value ?: return
+        if (chat !== host.session.value || chat.ownerVersion != host.ownerVersion.value) return
+        val scope = imagePasteScope ?: CoroutineScope(
+            viewModelScope.coroutineContext + SupervisorJob(viewModelScope.coroutineContext[Job]),
+        ).also { imagePasteScope = it }
+        scope.launch {
+            // Time out the wait even if the provider is still blocked in native I/O.
+            val reading = scope.async { read() }
+            try {
+                val result = withTimeoutOrNull(IMAGE_PASTE_TIMEOUT_MS) { reading.await() }
+                if (imagePasteScope !== scope || chat !== host.session.value || chat.ownerVersion != host.ownerVersion.value) return@launch
+                if (result == null) {
+                    showNotice(ComposerNotice.ImagePasteTimedOut)
+                    return@launch
+                }
+                val (picked, error) = result
+                error?.let(::showAttachmentError)
+                if (picked.isNotEmpty()) addAttachments(picked)
+            } finally {
+                reading.cancel()
+            }
+        }
+    }
+
+    private fun discardImagePastes() {
+        val previousReads = imagePasteScope
+        imagePasteScope = null
+        previousReads?.cancel()
+    }
+
     override fun removeAttachment(id: String) = _attachments.update { tray -> tray.filterNot { it.id == id } }
 
     override fun addComment(source: CommentSource, anchor: SelectionAnchor): Long {
@@ -919,6 +1041,11 @@ class ChatViewModel(
     }
 
     override fun removeComment(id: Long) = _comments.update { tray -> tray.filterNot { it.id == id } }
+
+    override fun reactToReply(key: String, reaction: ReplyReaction) {
+        val chat = session.value ?: return
+        viewModelScope.launch { chat.react(key, reaction) { session.value === chat } }
+    }
 
     override fun explain(source: CommentSource, anchor: SelectionAnchor) {
         val chat = session.value
@@ -1197,15 +1324,18 @@ class ChatViewModel(
      */
     override fun send(mode: RunningSend?) {
         val chat = session.value ?: return
-        val text = composer.text.toString()
+        val text = withoutEmptyListItem(composer.text)
         val attachments = _attachments.value
         val comments = _comments.value
         if (text.isBlank() && attachments.isEmpty() && comments.isEmpty()) return
-        _editing.value?.let { key -> return sendEdit(chat, key, text, comments) }
-        val command = SlashCommand.parse(text.trim())
+        _editing.value?.let { key ->
+            return if (_editingQueued.value) sendQueuedEdit(chat, key, text, comments) else sendEdit(chat, key, text, comments)
+        }
+        val command = SlashCommand.parse(text.trim()).takeIf { attachments.isEmpty() }
+        if (command?.name == "") return
+        discardImagePastes()
         // Commands run at once either way; they never become a turn to queue. Waiting comments stay for the next prompt.
-        if (command != null && attachments.isEmpty()) {
-            if (command.name.isEmpty()) return
+        if (command != null) {
             composer.clearText()
             runCommand(chat, command)
             return
@@ -1304,6 +1434,19 @@ class ChatViewModel(
         val prompt = state.messages.firstOrNull { it.key == key } as? ChatMessage.User ?: return
         if (_editing.value == null) typedBeforeEdit = composer.text.toString()
         editingRowId = prompt.rowId
+        _editingQueued.value = false
+        _editing.value = key
+        composer.setTextAndPlaceCursorAtEnd(prompt.text)
+    }
+
+    override fun startQueuedEdit(key: String) {
+        val state = state.value
+        if (connectionState.value !is ConnectionState.Connected || !state.canEditQueued(key)) return
+        val prompt = state.messages.firstOrNull { it.key == key } as? ChatMessage.User ?: return
+        if (_editing.value == null) typedBeforeEdit = composer.text.toString()
+        editingRowId = null
+        // Set first: the rewind edit's watch skips a queued edit.
+        _editingQueued.value = true
         _editing.value = key
         composer.setTextAndPlaceCursorAtEnd(prompt.text)
     }
@@ -1311,8 +1454,54 @@ class ChatViewModel(
     override fun cancelEdit() {
         if (_editing.value == null) return
         _editing.value = null
+        _editingQueued.value = false
         composer.setTextAndPlaceCursorAtEnd(typedBeforeEdit)
         typedBeforeEdit = ""
+    }
+
+    /** Where the queued prompt being edited is now. */
+    private enum class QueuedEditWatch { Waiting, Started, Gone }
+
+    /**
+     * The queued prompt being edited left the queue first: its turn started with the text it had. The edit stays in
+     * the composer, ahead of what it put aside, to send as a message of its own or drop; it isn't sent by itself.
+     */
+    private fun queuedEditOvertaken() {
+        val original = (state.value.messages.firstOrNull { it.key == _editing.value } as? ChatMessage.User)?.text
+        val edited = composer.text.toString().takeUnless { it.trim() == original?.trim() }.orEmpty()
+        _editing.value = null
+        _editingQueued.value = false
+        composer.setTextAndPlaceCursorAtEnd(listOf(edited, typedBeforeEdit).filter { it.isNotBlank() }.joinToString("\n\n"))
+        typedBeforeEdit = ""
+        showNotice(ComposerNotice.QueuedEditOvertaken)
+    }
+
+    /**
+     * Sends the edit of queued prompt [key]: its text becomes [text] (with any [comments]) where it waits, and it
+     * moves to the back of the queue. Unchanged, the edit just ends. Turned down, the edit is back in the composer
+     * while the prompt still waits; once its turn took it, what was typed stays there to send or drop.
+     */
+    private fun sendQueuedEdit(chat: ChatSession, key: String, text: String, comments: List<PendingComment>) {
+        if (text.isBlank() && comments.isEmpty()) return
+        val outgoing = if (comments.isEmpty()) text else formatReview(comments, text)
+        val before = (state.value.messages.firstOrNull { it.key == key } as? ChatMessage.User)?.text
+        if (outgoing.trim() == before?.trim()) return cancelEdit()
+        _comments.value = emptyList()
+        cancelEdit()
+        viewModelScope.launch {
+            val outcome = chat.replaceQueued(key, outgoing)
+            // Answered once another chat is open: its composer, comments and edit aren't this one's to change.
+            if (outcome == QueuedEditOutcome.Replaced || session.value !== chat) return@launch
+            _comments.update { comments + it }
+            if (outcome == QueuedEditOutcome.Failed && state.value.canEditQueued(key)) {
+                typedBeforeEdit = composer.text.toString()
+                _editingQueued.value = true
+                _editing.value = key
+                composer.setTextAndPlaceCursorAtEnd(text)
+            } else {
+                giveBack(text)
+            }
+        }
     }
 
     /**
@@ -1322,6 +1511,7 @@ class ChatViewModel(
     private fun editGone() {
         val edited = composer.text.toString()
         _editing.value = null
+        _editingQueued.value = false
         composer.setTextAndPlaceCursorAtEnd(listOf(edited, typedBeforeEdit).filter { it.isNotBlank() }.joinToString("\n\n"))
         typedBeforeEdit = ""
     }
@@ -1448,6 +1638,10 @@ class ChatViewModel(
 
     override fun stopReading() = voice.stopReading()
 
+    override fun pauseReading() = voice.pauseReading()
+
+    override fun resumeReading() = voice.resumeReading()
+
     override fun dismissReadAloudError() = voice.dismissReadAloudError()
 
     fun showTitle(title: String?) = session.value?.showTitle(title)
@@ -1461,6 +1655,8 @@ class ChatViewModel(
 
         /** Typing pauses this long before the draft is written to storage. */
         const val DRAFT_SAVE_DEBOUNCE_MS = 400L
+
+        const val IMAGE_PASTE_TIMEOUT_MS = 30_000L
 
         /** What Explain asks of the agent about the selection. */
         const val EXPLAIN_NOTE = "Explain this in more detail."
@@ -1500,6 +1696,12 @@ sealed interface ComposerNotice {
 
     /** The Call Hermes shortcut's call couldn't start. */
     data object CallNotStarted : ComposerNotice
+
+    /** A queued message's turn started before its edit was sent; the edit waits in the composer. */
+    data object QueuedEditOvertaken : ComposerNotice
+
+    /** An Android clipboard provider didn't finish in time. */
+    data object ImagePasteTimedOut : ComposerNotice
 
     /** More files were picked than a message carries. */
     data class TooManyAttachments(val max: Int) : ComposerNotice

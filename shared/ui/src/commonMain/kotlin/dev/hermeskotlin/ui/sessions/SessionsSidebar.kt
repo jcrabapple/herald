@@ -38,6 +38,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import com.composables.icons.lucide.AppWindow
+import dev.hermeskotlin.ui.gateways.savedLabel
 import dev.hermeskotlin.ui.clearOfWindowControls
 import dev.hermeskotlin.ui.CopyableOnDesktop
 import dev.hermeskotlin.ui.arrowFocus
@@ -126,6 +127,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import dev.hermeskotlin.core.settings.AppSettings
 import androidx.compose.ui.unit.Dp
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import dev.hermeskotlin.core.settings.SettingsStore
 import dev.hermeskotlin.core.settings.showsSidebarPage
 import dev.hermeskotlin.core.settings.sidebarMode
@@ -280,10 +284,12 @@ import androidx.compose.ui.input.pointer.isCtrlPressed
 import androidx.compose.ui.input.pointer.isMetaPressed
 import androidx.compose.ui.input.pointer.isShiftPressed
 import dev.hermeskotlin.ui.stepChat
+import dev.hermeskotlin.ui.neighbourAfterRemoving
+import androidx.compose.runtime.SideEffect
 import dev.hermeskotlin.ui.components.ConnectionLine
 import dev.hermeskotlin.ui.components.EmptyState
 import dev.hermeskotlin.ui.components.ListSkeleton
-import dev.hermeskotlin.ui.update.RenameBanner
+import dev.hermeskotlin.ui.update.SupportBanner
 import dev.hermeskotlin.ui.update.UpdateBanner
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -329,7 +335,8 @@ fun SessionsSidebar(
     onOpenSession: (session: SessionSummary, readUpTo: Double?) -> Unit,
     /** A new chat, in the project the list shows when one is picked (Home among them); null when none is. */
     onNewChat: (project: Project?) -> Unit,
-    onDeleted: (SessionSummary) -> Unit,
+    /** [deleted] is gone; [next] is the chat listed in its place, to open if [deleted] was open (null: none is left). */
+    onDeleted: (deleted: SessionSummary, next: SessionSummary?) -> Unit,
     onSessionExpired: () -> Unit,
     onSignOut: () -> Unit,
     onOpenGateways: () -> Unit,
@@ -366,6 +373,8 @@ fun SessionsSidebar(
     onOpenReportChat: (ReportChat) -> Unit = {},
     /** Where the pages show beside the docked sidebar on a desktop; null keeps them in the sidebar. */
     mainPage: MainPageSlot? = null,
+    /** Kept up to date with the chats this list shows, for the chat options menu's Delete. */
+    shownChats: ShownChats = remember { ShownChats() },
     viewModel: SessionsViewModel = koinViewModel(),
     bots: BotsViewModel = koinViewModel(),
     rooms: RoomsViewModel = koinViewModel(),
@@ -428,6 +437,7 @@ fun SessionsSidebar(
     var inboxOpenKey by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(inboxLink) {
         val link = inboxLink ?: return@LaunchedEffect
+        if (!link.current()) { onInboxLinkTaken(link); return@LaunchedEffect }
         inboxOpen = true
         inboxOpenKey = link.key
         onInboxLinkTaken(link)
@@ -546,8 +556,9 @@ fun SessionsSidebar(
     }
     val pageOpen = scheduledOpen || inboxOpen || routinesOf != null || capabilitiesOpen || configOpen || pluginsOpen || insightsOpen || kanbanOpen
 
-    // Back steps out of search or the Scheduled / Archived pages before it closes the drawer. On the desktop the
-    // sidebar stays put and a filter is picked like a tab, so Escape leaves it for the chat (stopping a reply).
+    // Back steps out of search or the Scheduled / Archived pages before it leaves the list (on a phone, the app).
+    // On the desktop the sidebar stays put and a filter is picked like a tab, so Escape leaves it for the chat
+    // (stopping a reply).
     // A page beside a docked sidebar is put away by Escape even with the sidebar folded away.
     val filterBacks = !isDesktop && state.filter != SessionListFilter.Recent
     PlatformBackHandler(enabled = visible && (searchOpen || pageOpen || filterBacks) || pageInMain && pageOpen) {
@@ -616,6 +627,27 @@ fun SessionsSidebar(
     }
     // The desktop's keys for the list: search, and stepping through the chats in the order they're listed.
     val listed = shownThreads.map { it.session } + sections.others.filter { attentionFilter.keeps(statuses[it.id]) }
+    // The chats as the list in view shows them, top to bottom, read when one is deleted for the chat to open in
+    // its place. With none in view (the Bots side, a phone's search before a word is typed), the Chats side's.
+    SideEffect {
+        shownChats.rows = {
+            val (pinned, rest) = sections.others.filter { attentionFilter.keeps(statuses[it.id]) }.partition { it.pinned }
+            chatsInView(
+                recent = visibleThreads(shownThreads, threadsCollapsed, selectedId, statuses, drafts).map { it.session } +
+                    visiblePinned(pinned, pinnedCollapsed, selectedId, statuses, drafts) + rest,
+                others = sections.others,
+                filtered = state.sessions,
+                results = state.searchResults,
+                searchOpen = searchOpen,
+                recentFilter = state.filter == SessionListFilter.Recent,
+                botsSide = mode == SidebarMode.Bots,
+                visible = visible,
+                desktop = isDesktop,
+            )
+        }
+        // A chat in a window of its own never also opens in the main window.
+        shownChats.windowed = { if (isDesktop) windowed else emptySet() }
+    }
     val modals = LocalOpenModals.current
     ShortcutHandler { shortcut ->
         when (shortcut) {
@@ -793,12 +825,7 @@ fun SessionsSidebar(
         }
     }
 
-    Box(
-        Modifier
-            .fillMaxSize()
-            .halo()
-            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.Start)),
-    ) {
+    SidebarFrame { footer ->
         if (pageKey != null && !pageInMain && !searchOpen) pageView() else Column(Modifier.fillMaxSize()) {
             when {
                 searchOpen -> SearchHeader(viewModel, focusAsks = searchFocusAsks, list = searchList, onClose = ::closeSearch, onSubmit = {
@@ -817,7 +844,7 @@ fun SessionsSidebar(
                     onBack = { viewModel.setFilter(SessionListFilter.Recent) },
                 )
                 else -> MainHeader(
-                    gatewayLabel = gateway.label,
+                    gatewayLabel = gateway.savedLabel(),
                     connection = connection,
                     onAccount = {
                         accountAnchor = null
@@ -846,7 +873,7 @@ fun SessionsSidebar(
                         modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
                     )
                 }
-                RenameBanner(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 8.dp))
+                SupportBanner(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 8.dp))
                 UpdateBanner(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 8.dp))
                 // A desktop starts a chat from the top of its sidebar, as desktop chat apps do; the footer
                 // keeps the account. A phone keeps the pill under the thumb.
@@ -1096,7 +1123,7 @@ fun SessionsSidebar(
                 openAccount()
             },
             onAccountBounds = { accountRow[0] = it },
-            modifier = Modifier.align(Alignment.BottomCenter),
+            modifier = Modifier.align(Alignment.BottomCenter).then(footer),
         )
     }
 
@@ -1170,8 +1197,10 @@ fun SessionsSidebar(
         deleteTarget,
         onDismiss = { deleteTarget = null },
         onDelete = {
+            // Before the delete, which takes the row out of the list at once.
+            val next = shownChats.after(it)
             viewModel.delete(it)
-            onDeleted(it)
+            onDeleted(it, next)
         },
     )
     // The picked profile, else the one the gateway runs as.
@@ -1238,12 +1267,7 @@ internal fun SessionsSidebarSample(
     // Folds for real in the gallery, kept only while the preview shows.
     var pinnedCollapsed by remember { mutableStateOf(false) }
     var threadsCollapsed by remember { mutableStateOf(false) }
-    Box(
-        Modifier
-            .fillMaxSize()
-            .halo()
-            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.Start)),
-    ) {
+    SidebarFrame { footer ->
         Column(Modifier.fillMaxSize()) {
             MainHeader(
                 gatewayLabel = "homelab",
@@ -1255,7 +1279,7 @@ internal fun SessionsSidebarSample(
                 activeProfile = profiles.firstOrNull()?.name,
                 menuInitiallyOpen = profileMenuOpen,
             )
-            RenameBanner(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 8.dp))
+            SupportBanner(Modifier.padding(start = 12.dp, end = 12.dp, bottom = 8.dp))
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 val index = remember(projects) { ProjectIndex(projects) }
                 val sections = threadSections(threads, sessions, sessions, selectedProject, index)
@@ -1312,7 +1336,7 @@ internal fun SessionsSidebarSample(
             onDismissMessage = {},
             onNewChat = {},
             onAccount = {},
-            modifier = Modifier.align(Alignment.BottomCenter),
+            modifier = Modifier.align(Alignment.BottomCenter).then(footer),
         )
     }
 }
@@ -1326,12 +1350,7 @@ internal fun BotsSidebarSample(
     needsYou: List<NeedsYou> = emptyList(),
     rooms: List<Room> = emptyList(),
 ) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .halo()
-            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.Start)),
-    ) {
+    SidebarFrame { footer ->
         Column(Modifier.fillMaxSize()) {
             MainHeader(gatewayLabel = "homelab", connection = null, onAccount = {}, onSettings = {}, onSearch = null)
             val modeNames = sidebarModeNames()
@@ -1365,7 +1384,7 @@ internal fun BotsSidebarSample(
             onDismissMessage = {},
             onNewChat = {},
             onAccount = {},
-            modifier = Modifier.align(Alignment.BottomCenter),
+            modifier = Modifier.align(Alignment.BottomCenter).then(footer),
         )
     }
 }
@@ -1540,7 +1559,7 @@ internal fun MainHeader(
         }
         // Search looks through chats; the bot roster is short enough to read. The header keeps its height
         // without the pill, so switching sides doesn't move the switch under the finger.
-        if (onSearch != null) SearchPill(onSearch) else Spacer(Modifier.height(maxOf(MinTouchTarget, SEARCH_PILL_HEIGHT)))
+        if (onSearch != null) SearchPill(onSearch) else Spacer(Modifier.height(searchRowHeight()))
     }
 }
 
@@ -1566,6 +1585,14 @@ private val PROFILE_NAME_MAX_WIDTH = 120.dp
 /** How tall the search pill is drawn; the touch target around it can be taller. */
 private val SEARCH_PILL_HEIGHT = 40.dp
 
+/**
+ * The search row: the touch target, and never less than the pill with 4dp over and under it, as a phone's 48dp
+ * gives. The desktop's 36dp target is shorter than the pill, which left what follows (the Chats / Bots switch,
+ * the support card) touching it.
+ */
+@Composable
+private fun searchRowHeight() = maxOf(MinTouchTarget, SEARCH_PILL_HEIGHT + 8.dp)
+
 /** A pill that opens search, in a full-height touch target. */
 @Composable
 private fun SearchPill(onClick: () -> Unit) {
@@ -1574,7 +1601,7 @@ private fun SearchPill(onClick: () -> Unit) {
     Box(
         Modifier
             .fillMaxWidth()
-            .heightIn(min = MinTouchTarget)
+            .heightIn(min = searchRowHeight())
             .padding(horizontal = 14.dp)
             .handCursor()
             .clickable(interaction, indication = null, role = Role.Button, onClick = onClick),
@@ -1718,6 +1745,57 @@ private fun SearchHeader(viewModel: SessionsViewModel, focusAsks: Int, list: Lis
         IconButton(Lucide.X, contentDescription = stringResource(Res.string.sessions_close_search), onClick = onClose, tint = Theme[colors][text])
     }
 }
+
+/**
+ * The chats as the sidebar lists them, top to bottom, for the chat options menu: deleting the open chat there
+ * opens the one listed after it, as a delete from the list does.
+ */
+class ShownChats {
+    internal var rows: () -> List<SessionSummary> = { emptyList() }
+
+    /** The chats in windows of their own, which don't take a deleted chat's place. */
+    internal var windowed: () -> Set<String> = { emptySet() }
+
+    /**
+     * The chat to open once [deleted] is gone: the one after it, or before it when it was last; null when none is
+     * left. A thread's row can carry a later id of its chat than the one that is open, so the lineage counts.
+     */
+    fun after(deleted: SessionSummary): SessionSummary? {
+        val elsewhere = windowed()
+        val list = rows().filter { it.isChat(deleted.id) || it.id !in elsewhere }
+        return neighbourAfterRemoving(list, list.indexOfFirst { it.isChat(deleted.id) })
+    }
+}
+
+/**
+ * The chats the sidebar's list shows, top to bottom. [recent] is the Recent list as sectioned and folded, [others]
+ * its chats outside Threads (what a desktop's search lists before a word is typed), [filtered] what another filter
+ * loaded (Archived) and [results] the search's. A search left open in a sidebar that isn't [visible] doesn't
+ * count: nobody sees its results. Nor do results left behind on the Bots side ([botsSide]), which shows its roster.
+ */
+internal fun chatsInView(
+    recent: List<SessionSummary>,
+    others: List<SessionSummary>,
+    filtered: List<SessionSummary>,
+    results: List<SessionSummary>?,
+    searchOpen: Boolean,
+    recentFilter: Boolean,
+    botsSide: Boolean,
+    visible: Boolean,
+    desktop: Boolean,
+): List<SessionSummary> {
+    val found = results.takeIf { visible }
+    return when {
+        !searchOpen && recentFilter && botsSide -> recent
+        found != null -> found.pinnedFirst()
+        searchOpen && visible && desktop -> others.pinnedFirst()
+        recentFilter -> recent
+        else -> filtered.pinnedFirst()
+    }
+}
+
+/** Pinned chats first, as [SessionList] shows them. */
+private fun List<SessionSummary>.pinnedFirst(): List<SessionSummary> = partition { it.pinned }.let { (pinned, rest) -> pinned + rest }
 
 /** Lets the search field hand the focus to the first chat the list under it shows. */
 private class ListFocus {
@@ -1864,6 +1942,30 @@ private fun NavTile(link: NavLink, modifier: Modifier = Modifier) {
                         .semantics { contentDescription = unread },
                 )
             }
+        }
+    }
+}
+
+/**
+ * How much of a sidebar list's end the floating footer covers: room for its last rows to scroll out from under it,
+ * and where its scrollbar stops. Measured on the desktop, whose account row is shorter than the 96dp kept for the
+ * phone's New chat pill; with that fixed room counted as content, a list that fits showed a scrollbar (#556).
+ */
+internal val LocalFooterInset = compositionLocalOf { 96.dp }
+
+/** The sidebar's ground, under the system bars' insets; [content] puts the modifier it's given on the footer. */
+@Composable
+private fun SidebarFrame(content: @Composable BoxScope.(footer: Modifier) -> Unit) {
+    val density = LocalDensity.current
+    var measured by remember { mutableStateOf<Dp?>(null) }
+    CompositionLocalProvider(LocalFooterInset provides (measured.takeIf { isDesktop } ?: 96.dp)) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .halo()
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Vertical + WindowInsetsSides.Start)),
+        ) {
+            content(Modifier.onSizeChanged { measured = with(density) { it.height.toDp() } })
         }
     }
 }
@@ -2277,13 +2379,13 @@ private fun SessionList(
             state = listState,
             modifier = Modifier.fillMaxSize().arrowFocus().then(if (isDesktop) Modifier.onKeyEvent(jump) else Modifier),
             // Room to scroll the last rows out from under the floating footer.
-            contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = 96.dp),
+            contentPadding = PaddingValues(start = 8.dp, end = 8.dp, bottom = LocalFooterInset.current),
             content = {
                 positions.clear()
                 PositionsScope(this, positions).rows()
             },
         )
-        VerticalScrollbar(listState, Modifier.align(Alignment.TopEnd).fillMaxHeight().padding(top = 2.dp, bottom = 96.dp, end = 1.dp))
+        VerticalScrollbar(listState, Modifier.align(Alignment.TopEnd).fillMaxHeight().padding(top = 2.dp, bottom = LocalFooterInset.current, end = 1.dp))
     }
 }
 
@@ -2645,7 +2747,7 @@ internal fun rowTone(status: RowStatus?, draft: Boolean): RowTone = when {
     status?.waiting == Waiting.Approval || status?.waiting == Waiting.Unknown -> RowTone.Approval
     status?.waiting != null -> RowTone.Question
     status?.running == true -> RowTone.Running
-    status?.unread == true -> RowTone.Reply
+    status?.newReply == true -> RowTone.Reply
     draft -> RowTone.Draft
     else -> RowTone.Idle
 }
@@ -2654,7 +2756,7 @@ internal fun rowTone(status: RowStatus?, draft: Boolean): RowTone = when {
 internal fun rowStatusWords(status: RowStatus?, draft: Boolean): List<StringResource> = listOfNotNull(
     status?.waiting?.let(::waitingWord),
     Res.string.sessions_status_running.takeIf { status?.running == true },
-    Res.string.sessions_status_new_reply.takeIf { status?.unread == true },
+    Res.string.sessions_status_new_reply.takeIf { status?.newReply == true },
     Res.string.sessions_status_draft.takeIf { draft },
 )
 

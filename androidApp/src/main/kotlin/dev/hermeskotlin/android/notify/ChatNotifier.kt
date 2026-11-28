@@ -1,8 +1,7 @@
 package dev.hermeskotlin.android.notify
 
-import android.content.Context
 import dev.hermeskotlin.core.chat.ChatHost
-import dev.hermeskotlin.core.chat.ChatMessage
+import dev.hermeskotlin.core.chat.newFinishedReply
 import dev.hermeskotlin.core.chat.ChatSession
 import dev.hermeskotlin.core.chat.ChatState
 import dev.hermeskotlin.core.chat.TurnOutcome
@@ -28,10 +27,11 @@ import kotlin.reflect.KClass
  * line) while a turn runs, a heads-up for every question the agent asks, and the reply when a turn ends. Requests and
  * replies are only posted while the app is out of sight, and cleared when it comes back.
  *
- * Runs on the main thread, so starting/stopping the service and posting its notification can't race.
+ * Runs on the main thread, so its own starts and stops of the service and its notification can't race. Android's start of
+ * the service can: [ChatServiceKeeper] never stops one that isn't in the foreground yet, which would be a crash.
  */
 class ChatNotifier(
-    private val context: Context,
+    private val keeper: ChatServiceKeeper,
     private val host: ChatHost,
     private val settings: SettingsStore,
     private val visibility: AppVisibility,
@@ -42,7 +42,7 @@ class ChatNotifier(
     private val outsideWork: StateFlow<Boolean> = MutableStateFlow(false),
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private var serviceStarted = false
+    private val service get() = keeper.hold
 
     fun start() {
         scope.launch {
@@ -54,7 +54,7 @@ class ChatNotifier(
                         // No chat open (the app started in the background after an update or reboot):
                         // Notifications anywhere still needs the process up, for its ntfy stream, and a watch turn the socket.
                         stay || outside -> keepConnected()
-                        else -> stopService()
+                        else -> service.release()
                     }
                 }
         }
@@ -66,6 +66,8 @@ class ChatNotifier(
     private suspend fun follow(session: ChatSession) = coroutineScope {
         val notified = mutableSetOf<String>()
         var previous: ChatState? = null
+        // The chat when the turn now running began: what a finished reply is new against.
+        var turnStart: ChatState? = null
         var shown: Shown? = null
         try {
             combine(session.state, visibility.visible, settings.settings, connection.state, outsideWork) { state, visible, stored, link, outside ->
@@ -76,15 +78,15 @@ class ChatNotifier(
 
                 // Each change is a chance to start it: Android refuses while the app is in the background.
                 val wanted = state.running || prefs.keepsProcessUp || outside
-                if (wanted && !serviceStarted) {
-                    serviceStarted = ChatService.start(context)
+                if (wanted && !service.wanted) {
+                    service.hold()
                     // The service shows the notification as it is when it starts.
                     shown = Shown(link::class, prefs.pushAnywhere)
                 }
-                if (!wanted) stopService()
+                if (!wanted) service.release()
                 // Its line says only whether Herald is connected, so it changes with the link, never with a turn.
                 val now = Shown(link::class, prefs.pushAnywhere)
-                if (serviceStarted && now != shown) {
+                if (service.wanted && now != shown) {
                     notifications.postOngoing(link, prefs.pushAnywhere)
                     shown = now
                 }
@@ -106,11 +108,12 @@ class ChatNotifier(
                     notifications.cancelRequest(it)
                 }
 
+                if (state.running && previous?.running != true) turnStart = state
                 val storedId = state.storedSessionId
                 if (storedId != null) {
                     if (state.running && previous?.running == false) notifications.cancelReply(storedId)
                     if (previous?.running == true && !state.running && !visible && prefs.notifyReplies) {
-                        val reply = state.messages.lastOrNull() as? ChatMessage.Assistant
+                        val reply = state.newFinishedReply(turnStart, previous)
                         if (reply != null && reply.outcome != TurnOutcome.Interrupted) {
                             val failed = reply.outcome == TurnOutcome.Error
                             val text = if (failed) reply.error ?: reply.text else reply.text
@@ -132,10 +135,10 @@ class ChatNotifier(
     }
 
     private suspend fun keepConnected() {
-        if (!serviceStarted) serviceStarted = ChatService.start(context)
+        service.hold()
         combine(connection.state, settings.settings) { state, prefs -> state to (prefs?.pushAnywhere == true) }
             .distinctUntilChanged()
-            .collect { (state, push) -> if (serviceStarted) notifications.postOngoing(state, push) }
+            .collect { (state, push) -> if (service.wanted) notifications.postOngoing(state, push) }
     }
 
     /**
@@ -143,13 +146,7 @@ class ChatNotifier(
      * the usual rules stop it again once nothing needs it. Main thread only.
      */
     fun startServiceNow() {
-        if (!serviceStarted) serviceStarted = ChatService.start(context)
-    }
-
-    private fun stopService() {
-        if (!serviceStarted) return
-        serviceStarted = false
-        ChatService.stop(context)
+        service.hold()
     }
 
     /** Notifications anywhere holds the ntfy stream, which needs the process alive between turns too. */

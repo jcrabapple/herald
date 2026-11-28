@@ -76,6 +76,7 @@ data class AppSettings(
      */
     val glow: Boolean = true,
     val textSize: TextSize = TextSize.Default,
+    val opaqueComposer: Boolean = false,
     /**
      * The language picked in Settings › Language, as a BCP 47 tag (`de`, `pt-BR`); null follows the system. Kept here
      * on the desktop and on Android 12 and older; Android 13 and later keep the app's language themselves, so there
@@ -96,6 +97,8 @@ data class AppSettings(
     val showPet: Boolean = true,
     /** Automatically fetch linked webpages and thumbnails; off until the user opts in. */
     val showLinkPreviews: Boolean = false,
+    /** Android: web links open in the browser app instead of a Custom Tab over the app. Mail and APK links are unaffected. */
+    val openWebLinksInBrowser: Boolean = false,
     /** The gateway's Next Prompt plugin's suggested next message, over the composer once a turn ends. */
     val suggestedReplies: Boolean = true,
     val voicePause: VoicePause = VoicePause.Normal,

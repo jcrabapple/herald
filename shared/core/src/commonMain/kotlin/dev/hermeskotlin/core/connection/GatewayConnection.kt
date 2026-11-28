@@ -37,7 +37,7 @@ sealed interface ConnectionState {
 
     data class Connecting(val attempt: Int) : ConnectionState
 
-    data class Connected(val client: JsonRpcClient, val ready: JsonObject) : ConnectionState
+    data class Connected(val client: JsonRpcClient, val ready: JsonObject, val gateway: GatewayUrl) : ConnectionState
 
     /** Lost or failed to connect; retrying at [retryAtMillis] (epoch ms). */
     data class Reconnecting(val attempt: Int, val retryAtMillis: Long, val reason: String) : ConnectionState
@@ -78,6 +78,7 @@ class GatewayConnection(
     private var job: Job? = null
     private var url: GatewayUrl? = null
     private val wake = Channel<Unit>(Channel.CONFLATED)
+    private val idle = MutableStateFlow(false)
 
     fun start(gateway: GatewayUrl) {
         if (url == gateway && job?.isActive == true) return
@@ -86,11 +87,19 @@ class GatewayConnection(
         job = scope.launch { loop(gateway) }
     }
 
+    fun isConnectedTo(gatewayUrl: String): Boolean =
+        (state.value as? ConnectionState.Connected)?.gateway?.value == gatewayUrl
+
     fun stop() {
         job?.cancel()
         job = null
         (_state.value as? ConnectionState.Connected)?.client?.let { client -> scope.launch { runCatching { client.close() } } }
         _state.value = ConnectionState.Idle
+    }
+
+    /** Nobody is looking: the socket's heartbeat slows down ([JsonRpcClient.setIdle]), for this socket and the next. */
+    fun setIdle(idle: Boolean) {
+        this.idle.value = idle
     }
 
     /** Skip the current backoff wait, or restart after [ConnectionState.Failed]. */
@@ -120,7 +129,7 @@ class GatewayConnection(
 
             var connectedAt: Long? = null
             val failure: Exception = try {
-                runSession(openSocket(gateway, ticket)) { connectedAt = clock() }
+                runSession(gateway, openSocket(gateway, ticket)) { connectedAt = clock() }
             } catch (e: TimeoutCancellationException) {
                 // The ready wait gives up as a cancellation; that is a failed attempt, not a cancelled loop.
                 e
@@ -164,7 +173,7 @@ class GatewayConnection(
                     return
                 }
                 failure is HandshakeRejectedException && failure.status == 404 -> {
-                    _state.value = ConnectionState.Failed("This dashboard has no chat endpoint (/api/ws). Update Hermes.")
+                    _state.value = ConnectionState.Failed("This dashboard has no chat endpoint (/api/ws). Check that the proxy forwards /api/ws.")
                     return
                 }
                 failure is TransportClosedException && failure.code == GatewayCloseCodes.TICKET_REJECTED -> {
@@ -186,8 +195,10 @@ class GatewayConnection(
      * Waits for `gateway.ready`, publishes [ConnectionState.Connected], then pumps until the socket
      * dies. Never returns normally.
      */
-    private suspend fun runSession(transport: RpcTransport, onConnected: () -> Unit): Nothing = coroutineScope {
+    private suspend fun runSession(gateway: GatewayUrl, transport: RpcTransport, onConnected: () -> Unit): Nothing = coroutineScope {
         val client = JsonRpcClient(transport, answers = InputRequest.METHODS::contains)
+        // Followed for the socket's whole life, the wait for gateway.ready included: a change made then isn't lost.
+        launch { idle.collect { client.setIdle(it) } }
         val pump = async { client.run() }
         val ready = try {
             withTimeout(readyTimeoutMs) { client.ready.await() }
@@ -197,7 +208,7 @@ class GatewayConnection(
             throw e
         }
         onConnected()
-        _state.value = ConnectionState.Connected(client, ready)
+        _state.value = ConnectionState.Connected(client, ready, gateway)
         pump.await()
     }
 

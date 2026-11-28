@@ -6,12 +6,15 @@ import dev.hermeskotlin.core.bots.MentionQuery
 import dev.hermeskotlin.core.chat.ChatMessage
 import dev.hermeskotlin.core.chat.pathRefQuery
 import dev.hermeskotlin.core.projects.PathEntry
+import dev.hermeskotlin.core.sessions.SessionSummary
 import dev.hermeskotlin.ui.chat.PromptRecall
 import dev.hermeskotlin.ui.chat.findMatches
 import dev.hermeskotlin.ui.chat.moveHighlight
 import dev.hermeskotlin.ui.chat.refChoices
+import dev.hermeskotlin.ui.chat.transcriptMarkdown
 import dev.hermeskotlin.ui.components.PaletteItem
 import dev.hermeskotlin.ui.components.paletteMatches
+import dev.hermeskotlin.ui.sessions.ShownChats
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -25,6 +28,34 @@ class DesktopUxTest {
         assertEquals(RowClick.NewWindow, rowClick(shift = false, primary = true, alt = false))
         // Alt+Shift holds Shift too, and wins.
         assertEquals(RowClick.Archive, rowClick(shift = true, primary = false, alt = true))
+    }
+
+    @Test
+    fun aRemovedRowHandsOverToTheNextOrThePrevious() {
+        val rows = listOf("a", "b", "c")
+        assertEquals("b", neighbourAfterRemoving(rows, 0))
+        assertEquals("c", neighbourAfterRemoving(rows, 1))
+        // The last row: the one before it.
+        assertEquals("b", neighbourAfterRemoving(rows, 2))
+        // The only row, or one not in the list: nothing takes its place.
+        assertNull(neighbourAfterRemoving(listOf("a"), 0))
+        assertNull(neighbourAfterRemoving(rows, -1))
+        assertNull(neighbourAfterRemoving(emptyList<String>(), 0))
+    }
+
+    @Test
+    fun aDeletedChatOpensTheOneListedInItsPlace() {
+        val shown = ShownChats()
+        val (a, b, c) = listOf("a", "b", "c").map { SessionSummary(it) }
+        // Nothing reported yet (the sidebar not drawn): a new chat.
+        assertNull(shown.after(a))
+        shown.rows = { listOf(a, b, c) }
+        assertEquals(b, shown.after(a))
+        assertEquals(b, shown.after(c))
+        // A chat this view doesn't list (another filter, or the Archived view): a new chat, not a guess.
+        assertNull(shown.after(SessionSummary("elsewhere")))
+        shown.rows = { listOf(b) }
+        assertNull(shown.after(b))
     }
 
     @Test
@@ -99,6 +130,28 @@ class DesktopUxTest {
         assertEquals(listOf(0, 1), findMatches(messages, " api "))
         assertEquals(emptyList(), findMatches(messages, ""))
         assertEquals(listOf(2), findMatches(messages, "model"))
+        // Saved commentary is shown in the transcript, so it's found there too.
+        assertEquals(listOf(0), findMatches(listOf(ChatMessage.Assistant("a2", commentary = listOf("Checking the logs."))), "logs"))
+    }
+
+    @Test
+    fun findMatchesSavedProgressWithOrWithoutAnAnswer() {
+        val messages = listOf(
+            ChatMessage.Assistant("a1", text = "Done.", commentary = listOf("Checking logs.")),
+            ChatMessage.Assistant("a2", commentary = listOf("Checking more logs.")),
+        )
+        assertEquals(listOf(0, 1), findMatches(messages, "checking"))
+        assertEquals(listOf(0), findMatches(messages, "done"))
+    }
+
+    @Test
+    fun exportIncludesSavedProgressInTranscriptOrder() {
+        val messages = listOf(
+            ChatMessage.Assistant("a1", text = "Done.", commentary = listOf("Checking logs.", "Found it.")),
+            ChatMessage.Assistant("a2", commentary = listOf("Checking again.")),
+        )
+        assertEquals("# Chat\n\n## Hermes\n\nChecking logs.\n\nFound it.\n\nDone.\n\n## Hermes\n\nChecking again.\n",
+            transcriptMarkdown("Chat", messages))
     }
 
     @Test
